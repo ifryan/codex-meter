@@ -36,6 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         category: "usage"
     )
     private let usageClient = CodexUsageClient()
+    private let isDemoMode = ProcessInfo.processInfo.arguments.contains("--demo")
+        || ProcessInfo.processInfo.environment["CODEX_METER_DEMO"] == "1"
     private var notchPanel: NotchPanelController!
     private var refreshTimer: Timer?
     private var displayTimer: Timer?
@@ -58,6 +60,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             object: nil
         )
 
+        if isDemoMode {
+            let now = Date()
+            state = .loaded(Self.demoSnapshot(now: now))
+            render(now: now)
+            return
+        }
+
         render()
         refresh()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 5 * 60, repeats: true) { [weak self] _ in
@@ -78,6 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func refresh() {
+        guard !isDemoMode else { return }
         guard !state.isLoading else { return }
         let previous = state.snapshot
         state = .loading(previous: previous)
@@ -253,6 +263,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func quit() { NSApp.terminate(nil) }
+
+    private static func demoSnapshot(now: Date) -> UsageSnapshot {
+        UsageSnapshot(
+            plan: "plus",
+            main: RateBucket(
+                id: "codex",
+                name: "Codex",
+                primary: RateWindow(
+                    usedPercent: 48,
+                    durationMinutes: 10_080,
+                    resetsAt: now.addingTimeInterval(3 * 3_600)
+                ),
+                secondary: nil
+            ),
+            buckets: [],
+            resetCreditCount: 3,
+            resetCredits: [7, 14, 28].map {
+                ResetCredit(expiresAt: now.addingTimeInterval(TimeInterval($0 * 86_400)))
+            },
+            fetchedAt: now
+        )
+    }
 
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
