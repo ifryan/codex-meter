@@ -1,7 +1,10 @@
 .DS_Store
 .build/
+.swiftpm/
 dist/
 DerivedData/
+*.dmg
+*.zip
 *.xcuserstate
 *.xccheckout
 xcuserdata/

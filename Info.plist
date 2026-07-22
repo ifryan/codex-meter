@@ -9,7 +9,7 @@
     <key>CFBundleExecutable</key>
     <string>CodexMeter</string>
     <key>CFBundleIdentifier</key>
-    <string>com.ryan.codexmeter</string>
+    <string>io.github.ifryan.codexmeter</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -17,14 +17,22 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.2.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
+    <key>ATSApplicationFontsPath</key>
+    <string>Fonts</string>
     <key>LSMinimumSystemVersion</key>
-    <string>13.0</string>
+    <string>14.0</string>
     <key>LSUIElement</key>
     <true/>
     <key>NSHumanReadableCopyright</key>
-    <string>Built for local Codex usage monitoring.</string>
+    <string>Copyright © 2026 Ryan. Licensed under GPL-3.0-only.</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>LSMultipleInstancesProhibited</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
 </dict>
 </plist>

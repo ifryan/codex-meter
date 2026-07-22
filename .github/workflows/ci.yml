@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Repository checks
+        run: |
+          git diff --check
+          sh -n build-app.sh
+
+      - name: Unit tests
+        run: swift test
+
+      - name: Build Universal app
+        run: ./build-app.sh
+
+      - name: Verify bundle
+        run: |
+          codesign --verify --strict --verbose=2 "dist/Codex Meter.app"
+          test "$(lipo -archs 'dist/Codex Meter.app/Contents/MacOS/CodexMeter')" = "x86_64 arm64" || \
+            test "$(lipo -archs 'dist/Codex Meter.app/Contents/MacOS/CodexMeter')" = "arm64 x86_64"
+          xcrun vtool -show-build "dist/Codex Meter.app/Contents/MacOS/CodexMeter"
