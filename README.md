@@ -107,7 +107,7 @@ Sources/CodexMeter/
 ├── CodexUsageClient.swift   Codex 子进程与 JSON-RPC transport
 ├── NotchUI.swift            刘海绘制、路径进度和窗口控制
 ├── AppDelegate.swift        状态机、刷新、菜单和登录项
-└── main.swift               应用入口
+└── CodexMeterApp.swift      应用入口
 
 Tests/CodexMeterTests/       协议、时间和路径算法测试
 Resources/Fonts/             Ubuntu Mono 及其许可证
