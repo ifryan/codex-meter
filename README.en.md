@@ -13,6 +13,12 @@ Codex Meter is a lightweight native macOS utility that displays local Codex usag
 > [!IMPORTANT]
 > This is an unofficial community project. It is not affiliated with or endorsed by OpenAI. Codex is a product and trademark of OpenAI.
 
+## Preview
+
+| Default | Hover |
+| --- | --- |
+| ![Codex Meter default state with remaining percentage on the left and reset time on the right](docs/images/codex-meter-collapsed.png) | ![Codex Meter hover state with reset-credit expiration times](docs/images/codex-meter-expanded.png) |
+
 ## How it works
 
 The app launches the locally installed `codex app-server --stdio` process and reads the rate limits associated with the current local Codex login. It does not implement its own authentication flow and does not ask for or persist access tokens.
