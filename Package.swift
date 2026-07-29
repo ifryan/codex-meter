@@ -15,7 +15,8 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("QuartzCore"),
-                .linkedFramework("ServiceManagement")
+                .linkedFramework("ServiceManagement"),
+                .linkedFramework("UserNotifications")
             ]
         ),
         .testTarget(name: "CodexMeterTests", dependencies: ["CodexMeter"])

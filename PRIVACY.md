@@ -21,10 +21,14 @@ Codex Meter 不直接读取、接收或保存 Token、Cookie 和密码。它启�
 
 应用会通过 macOS Unified Logging 记录刷新成功或失败。具体错误内容使用私有日志字段，不记录完整响应、Token 或账户标识。
 
+## 本地通知
+
+用户允许通知后，应用会在连续快照检测到主额度重置时，交由 macOS 发送包含当前剩余百分比的本地通知。通知内容不会发送到 Codex Meter 自建服务；拒绝通知权限只会关闭此提醒，不影响额度读取和显示。
+
 ## 可执行文件边界
 
 应用会从标准位置和 `PATH` 查找 `codex`，也支持 `CODEX_METER_CODEX_PATH`。指定自定义路径意味着用户信任该可执行文件以当前账户权限运行。
 
 ---
 
-Codex Meter processes rate-limit percentages, reset times, reset-credit metadata, and the plan identifier returned by the local Codex app-server. Snapshots remain in memory only. The app does not directly read or store tokens, cookies, or passwords, and it includes no analytics or custom backend. Authentication and network activity are performed by the locally installed Codex process.
+Codex Meter processes rate-limit percentages, reset times, reset-credit metadata, and the plan identifier returned by the local Codex app-server. Snapshots remain in memory only. With permission, macOS may display a local notification containing the current remaining percentage after a reset is detected; the notification is not sent to a Codex Meter backend. The app does not directly read or store tokens, cookies, or passwords, and it includes no analytics or custom backend. Authentication and network activity are performed by the locally installed Codex process.

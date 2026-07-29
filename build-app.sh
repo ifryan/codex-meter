@@ -28,6 +28,7 @@ for arch in $ARCHS; do
         -framework Foundation \
         -framework QuartzCore \
         -framework ServiceManagement \
+        -framework UserNotifications \
         "$@" \
         -o "$output"
     binary_count=$((binary_count + 1))

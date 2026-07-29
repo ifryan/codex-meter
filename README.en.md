@@ -8,10 +8,17 @@ Codex Meter is a lightweight native macOS utility that displays local Codex usag
 - Time until reset on the right, using `D`, `H`, and `M`
 - A green, yellow, or red gradient along the notch edge
 - Reset-credit expirations in a compact hover panel
+- A local system notification when consecutive refreshes detect a quota reset
 - Full rate-limit details, refresh, launch-at-login, and quit actions in the click menu
 
 > [!IMPORTANT]
 > This is an unofficial community project. It is not affiliated with or endorsed by OpenAI. Codex is a product and trademark of OpenAI.
+
+## Preview
+
+| Default | Hover |
+| --- | --- |
+| ![Codex Meter default state with remaining percentage on the left and reset time on the right](docs/images/codex-meter-collapsed.png) | ![Codex Meter hover state with reset-credit expiration times](docs/images/codex-meter-expanded.png) |
 
 ## How it works
 

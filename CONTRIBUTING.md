@@ -33,4 +33,15 @@ swift test
 ./build-app.sh
 ```
 
+## 固定演示数据
+
+维护文档截图或检查 UI 时，请使用内置演示模式，避免公开真实账户余量：
+
+```sh
+./build-app.sh
+CODEX_METER_DEMO=1 "dist/Codex Meter.app/Contents/MacOS/CodexMeter"
+```
+
+演示模式固定展示 `52%`、`3H` 和 `7D/14D/28D`，不会启动 Codex app-server。
+
 Pull Request 请说明修改原因、用户影响、验证方式及任何协议兼容性变化。
