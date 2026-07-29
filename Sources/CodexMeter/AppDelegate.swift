@@ -36,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         category: "usage"
     )
     private let usageClient = CodexUsageClient()
+    private let resetNotifier = QuotaResetNotifier()
     private let isDemoMode = ProcessInfo.processInfo.arguments.contains("--demo")
         || ProcessInfo.processInfo.environment["CODEX_METER_DEMO"] == "1"
     private var notchPanel: NotchPanelController!
@@ -67,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        resetNotifier.prepare()
         render()
         refresh()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 5 * 60, repeats: true) { [weak self] _ in
@@ -98,6 +100,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 let snapshot = try await usageClient.fetch()
                 guard !Task.isCancelled else { return }
+                if let resetEvent = QuotaResetDetector.detect(previous: previous, current: snapshot) {
+                    resetNotifier.notify(resetEvent)
+                    logger.info(
+                        "Detected Codex quota reset: \(resetEvent.previousRemainingPercent)% -> \(resetEvent.currentRemainingPercent)%"
+                    )
+                }
                 state = .loaded(snapshot)
                 logger.info("Fetched Codex usage successfully")
             } catch is CancellationError {

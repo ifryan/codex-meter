@@ -45,6 +45,71 @@ final class DomainTests: XCTestCase {
         XCTAssertEqual(snapshot.resetCredits.count, 1)
     }
 
+    func testQuotaResetDetectedWhenRemainingReturnsNearFull() throws {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let previous = snapshot(remainingPercent: 24, resetsAt: now.addingTimeInterval(300), fetchedAt: now)
+        let current = snapshot(
+            remainingPercent: 94,
+            resetsAt: now.addingTimeInterval(7 * 24 * 3_600),
+            fetchedAt: now.addingTimeInterval(300)
+        )
+
+        let event = try XCTUnwrap(QuotaResetDetector.detect(previous: previous, current: current))
+        XCTAssertEqual(event.previousRemainingPercent, 24)
+        XCTAssertEqual(event.currentRemainingPercent, 94)
+        XCTAssertEqual(event.detectedAt, current.fetchedAt)
+    }
+
+    func testQuotaResetIsNotDetectedFromFirstOrDecreasingSnapshot() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let nearFull = snapshot(remainingPercent: 96, resetsAt: nil, fetchedAt: now)
+        let decreased = snapshot(remainingPercent: 95, resetsAt: nil, fetchedAt: now.addingTimeInterval(300))
+
+        XCTAssertNil(QuotaResetDetector.detect(previous: nil, current: nearFull))
+        XCTAssertNil(QuotaResetDetector.detect(previous: nearFull, current: decreased))
+    }
+
+    func testQuotaResetIgnoresSmallNearFullCorrectionWithinSameWindow() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let resetAt = now.addingTimeInterval(3_600)
+        let previous = snapshot(remainingPercent: 94, resetsAt: resetAt, fetchedAt: now)
+        let corrected = snapshot(
+            remainingPercent: 96,
+            resetsAt: resetAt,
+            fetchedAt: now.addingTimeInterval(300)
+        )
+
+        XCTAssertNil(QuotaResetDetector.detect(previous: previous, current: corrected))
+    }
+
+    func testQuotaResetDetectedWhenRemainingReachesExactlyFull() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let previous = snapshot(remainingPercent: 99, resetsAt: nil, fetchedAt: now)
+        let current = snapshot(
+            remainingPercent: 100,
+            resetsAt: nil,
+            fetchedAt: now.addingTimeInterval(300)
+        )
+
+        XCTAssertNotNil(QuotaResetDetector.detect(previous: previous, current: current))
+    }
+
+    func testQuotaResetDetectedWhenResetWindowAdvancesWhileAlreadyNearFull() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let previous = snapshot(
+            remainingPercent: 94,
+            resetsAt: now.addingTimeInterval(300),
+            fetchedAt: now
+        )
+        let current = snapshot(
+            remainingPercent: 96,
+            resetsAt: now.addingTimeInterval(7 * 24 * 3_600),
+            fetchedAt: now.addingTimeInterval(300)
+        )
+
+        XCTAssertNotNil(QuotaResetDetector.detect(previous: previous, current: current))
+    }
+
     func testEdgePathTrimmingUsesPathLength() {
         let path = NSBezierPath()
         path.move(to: NSPoint(x: 0, y: 0))
@@ -53,5 +118,29 @@ final class DomainTests: XCTestCase {
         XCTAssertTrue(EdgePathTrimmer.trim(path, fraction: 0).isEmpty)
         XCTAssertEqual(EdgePathTrimmer.trim(path, fraction: 0.52).currentPoint.x, 52, accuracy: 0.001)
         XCTAssertEqual(EdgePathTrimmer.trim(path, fraction: 1).currentPoint.x, 100, accuracy: 0.001)
+    }
+
+    private func snapshot(
+        remainingPercent: Int,
+        resetsAt: Date?,
+        fetchedAt: Date
+    ) -> UsageSnapshot {
+        UsageSnapshot(
+            plan: "plus",
+            main: RateBucket(
+                id: "codex",
+                name: "Codex",
+                primary: RateWindow(
+                    usedPercent: 100 - remainingPercent,
+                    durationMinutes: 10_080,
+                    resetsAt: resetsAt
+                ),
+                secondary: nil
+            ),
+            buckets: [],
+            resetCreditCount: nil,
+            resetCredits: [],
+            fetchedAt: fetchedAt
+        )
     }
 }

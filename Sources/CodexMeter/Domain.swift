@@ -29,6 +29,55 @@ struct UsageSnapshot: Equatable, Sendable {
     let fetchedAt: Date
 }
 
+struct QuotaResetEvent: Equatable, Sendable {
+    let previousRemainingPercent: Int
+    let currentRemainingPercent: Int
+    let detectedAt: Date
+}
+
+enum QuotaResetDetector {
+    private static let nearFullRemainingPercent = 90
+    private static let meaningfulIncrease = 5
+
+    static func detect(previous: UsageSnapshot?, current: UsageSnapshot) -> QuotaResetEvent? {
+        guard
+            let previousWindow = previous?.main.primary,
+            let currentWindow = current.main.primary
+        else {
+            return nil
+        }
+
+        let previousRemaining = previousWindow.remainingPercent
+        let currentRemaining = currentWindow.remainingPercent
+        let increase = currentRemaining - previousRemaining
+        guard currentRemaining >= nearFullRemainingPercent, increase > 0 else { return nil }
+
+        let reachedCompletelyFull = currentRemaining == 100
+        let crossedNearFullThreshold = previousRemaining < nearFullRemainingPercent
+        let resetWindowAdvanced: Bool
+        if let previousReset = previousWindow.resetsAt, let currentReset = currentWindow.resetsAt {
+            resetWindowAdvanced = currentReset > previousReset
+        } else {
+            resetWindowAdvanced = false
+        }
+
+        guard
+            reachedCompletelyFull
+                || crossedNearFullThreshold
+                || resetWindowAdvanced
+                || increase >= meaningfulIncrease
+        else {
+            return nil
+        }
+
+        return QuotaResetEvent(
+            previousRemainingPercent: previousRemaining,
+            currentRemainingPercent: currentRemaining,
+            detectedAt: current.fetchedAt
+        )
+    }
+}
+
 struct ResetCreditDisplayRow: Equatable, Sendable {
     let title: String
     let expiry: String
