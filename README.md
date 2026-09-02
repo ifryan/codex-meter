@@ -6,13 +6,13 @@
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black.svg)](https://www.apple.com/macos/)
 
-Codex Meter 是一个轻量的原生 macOS 刘海工具，在物理刘海两侧持续展示本机 Codex 账户的额度状态。
+Codex Meter 是一个轻量的原生 macOS 刘海工具，在物理刘海两侧持续展示本机 Codex 与 Claude Code 账户的额度状态。
 
-- 左侧：主额度剩余百分比
-- 右侧：距离重置的剩余时间，使用 `D`、`H`、`M`
-- 刘海边缘：按额度充足程度显示绿、黄、红渐变进度线
-- 鼠标悬停：展开一行重置卡信息，多张卡用 `/` 分隔
-- 额度重置：连续刷新检测到主额度恢复至接近 100% 时发送系统通知
+- 左侧：Codex 主额度剩余百分比及重置倒计时
+- 右侧：Claude 5 小时 / 7 天两个窗口中剩余较少的那个，及其重置倒计时
+- 刘海边缘：左右各一条独立的绿、黄、红渐变进度环，分别对应 Codex 与 Claude
+- 鼠标悬停：展开明细面板，逐行列出 Codex 各额度窗口、重置卡、Claude 5 小时与 7 天额度
+- 额度重置：Codex 或 Claude 的任一窗口恢复至接近 100% 时发送系统通知
 - 点击：查看全部额度窗口、更新时间、手动刷新、开机启动和退出选项
 
 > [!IMPORTANT]
@@ -39,6 +39,17 @@ codex app-server --stdio
 - 应用本身不读取或保存访问令牌；
 - 用量快照只保存在内存中，退出应用后不会保留；
 - 实际网络访问和身份验证由本机 Codex 进程完成。
+
+完整说明见 [PRIVACY.md](PRIVACY.md)。
+
+## Claude 额度怎么来的
+
+Claude Code 没有 Codex 那样的本地 JSON-RPC 接口。Codex Meter 复用 `claude` CLI 自己在 macOS 钥匙串里保存的登录态（服务名 `Claude Code-credentials`），直接请求 `claude` CLI 的 `/usage` 命令读取的同一个接口（`GET https://api.anthropic.com/api/oauth/usage`），和 Codex 一样按固定周期自动刷新，不依赖任何 Claude Code 会话正在运行。
+
+- 只读：Codex Meter 从不写入这个钥匙串条目，也不会做令牌刷新（避免和 `claude` CLI 自身的令牌轮换互相冲突）；
+- 首次读取钥匙串时，系统会弹出标准的“允许访问”授权提示，需要手动允许一次；
+- 如果登录令牌已过期，菜单会显示“Claude 登录已过期，请打开 Claude Code 刷新登录状态”——只需正常使用一次 `claude`（命令行或任意客户端）触发它自己的登录刷新，Codex Meter 下一次刷新就能读到新令牌；
+- 这是一个未公开文档化的私有接口，字段形状可能随 Claude Code 版本变化而调整。
 
 完整说明见 [PRIVACY.md](PRIVACY.md)。
 
@@ -111,11 +122,13 @@ CODEX_METER_CODEX_PATH=/absolute/path/to/codex \
 
 ```text
 Sources/CodexMeter/
-├── Domain.swift             数据模型、Codable 协议和格式化
-├── CodexUsageClient.swift   Codex 子进程与 JSON-RPC transport
-├── NotchUI.swift            刘海绘制、路径进度和窗口控制
-├── AppDelegate.swift        状态机、刷新、菜单和登录项
-└── CodexMeterApp.swift      应用入口
+├── Domain.swift              数据模型、Codable 协议和格式化
+├── CodexUsageClient.swift    Codex 子进程与 JSON-RPC transport
+├── ClaudeUsageClient.swift   读取钥匙串登录态并请求 Claude 私有 usage 接口
+├── NotchUI.swift             刘海绘制、双环路径进度和窗口控制
+├── AppDelegate.swift         状态机、刷新、菜单和登录项
+├── QuotaResetNotifier.swift  额度重置系统通知
+└── CodexMeterApp.swift       应用入口
 
 Tests/CodexMeterTests/       协议、时间和路径算法测试
 Resources/Fonts/             Ubuntu Mono 及其许可证

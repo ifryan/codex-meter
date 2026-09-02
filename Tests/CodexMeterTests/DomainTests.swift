@@ -47,67 +47,48 @@ final class DomainTests: XCTestCase {
 
     func testQuotaResetDetectedWhenRemainingReturnsNearFull() throws {
         let now = Date(timeIntervalSince1970: 1_000_000)
-        let previous = snapshot(remainingPercent: 24, resetsAt: now.addingTimeInterval(300), fetchedAt: now)
-        let current = snapshot(
-            remainingPercent: 94,
-            resetsAt: now.addingTimeInterval(7 * 24 * 3_600),
-            fetchedAt: now.addingTimeInterval(300)
-        )
+        let previous = window(remainingPercent: 24, resetsAt: now.addingTimeInterval(300))
+        let current = window(remainingPercent: 94, resetsAt: now.addingTimeInterval(7 * 24 * 3_600))
+        let detectedAt = now.addingTimeInterval(300)
 
-        let event = try XCTUnwrap(QuotaResetDetector.detect(previous: previous, current: current))
+        let event = try XCTUnwrap(QuotaResetDetector.detect(previous: previous, current: current, at: detectedAt))
         XCTAssertEqual(event.previousRemainingPercent, 24)
         XCTAssertEqual(event.currentRemainingPercent, 94)
-        XCTAssertEqual(event.detectedAt, current.fetchedAt)
+        XCTAssertEqual(event.detectedAt, detectedAt)
     }
 
     func testQuotaResetIsNotDetectedFromFirstOrDecreasingSnapshot() {
         let now = Date(timeIntervalSince1970: 1_000_000)
-        let nearFull = snapshot(remainingPercent: 96, resetsAt: nil, fetchedAt: now)
-        let decreased = snapshot(remainingPercent: 95, resetsAt: nil, fetchedAt: now.addingTimeInterval(300))
+        let nearFull = window(remainingPercent: 96, resetsAt: nil)
+        let decreased = window(remainingPercent: 95, resetsAt: nil)
 
-        XCTAssertNil(QuotaResetDetector.detect(previous: nil, current: nearFull))
-        XCTAssertNil(QuotaResetDetector.detect(previous: nearFull, current: decreased))
+        XCTAssertNil(QuotaResetDetector.detect(previous: nil, current: nearFull, at: now))
+        XCTAssertNil(QuotaResetDetector.detect(previous: nearFull, current: decreased, at: now.addingTimeInterval(300)))
     }
 
     func testQuotaResetIgnoresSmallNearFullCorrectionWithinSameWindow() {
         let now = Date(timeIntervalSince1970: 1_000_000)
         let resetAt = now.addingTimeInterval(3_600)
-        let previous = snapshot(remainingPercent: 94, resetsAt: resetAt, fetchedAt: now)
-        let corrected = snapshot(
-            remainingPercent: 96,
-            resetsAt: resetAt,
-            fetchedAt: now.addingTimeInterval(300)
-        )
+        let previous = window(remainingPercent: 94, resetsAt: resetAt)
+        let corrected = window(remainingPercent: 96, resetsAt: resetAt)
 
-        XCTAssertNil(QuotaResetDetector.detect(previous: previous, current: corrected))
+        XCTAssertNil(QuotaResetDetector.detect(previous: previous, current: corrected, at: now.addingTimeInterval(300)))
     }
 
     func testQuotaResetDetectedWhenRemainingReachesExactlyFull() {
         let now = Date(timeIntervalSince1970: 1_000_000)
-        let previous = snapshot(remainingPercent: 99, resetsAt: nil, fetchedAt: now)
-        let current = snapshot(
-            remainingPercent: 100,
-            resetsAt: nil,
-            fetchedAt: now.addingTimeInterval(300)
-        )
+        let previous = window(remainingPercent: 99, resetsAt: nil)
+        let current = window(remainingPercent: 100, resetsAt: nil)
 
-        XCTAssertNotNil(QuotaResetDetector.detect(previous: previous, current: current))
+        XCTAssertNotNil(QuotaResetDetector.detect(previous: previous, current: current, at: now.addingTimeInterval(300)))
     }
 
     func testQuotaResetDetectedWhenResetWindowAdvancesWhileAlreadyNearFull() {
         let now = Date(timeIntervalSince1970: 1_000_000)
-        let previous = snapshot(
-            remainingPercent: 94,
-            resetsAt: now.addingTimeInterval(300),
-            fetchedAt: now
-        )
-        let current = snapshot(
-            remainingPercent: 96,
-            resetsAt: now.addingTimeInterval(7 * 24 * 3_600),
-            fetchedAt: now.addingTimeInterval(300)
-        )
+        let previous = window(remainingPercent: 94, resetsAt: now.addingTimeInterval(300))
+        let current = window(remainingPercent: 96, resetsAt: now.addingTimeInterval(7 * 24 * 3_600))
 
-        XCTAssertNotNil(QuotaResetDetector.detect(previous: previous, current: current))
+        XCTAssertNotNil(QuotaResetDetector.detect(previous: previous, current: current, at: now.addingTimeInterval(300)))
     }
 
     func testEdgePathTrimmingUsesPathLength() {
@@ -120,27 +101,82 @@ final class DomainTests: XCTestCase {
         XCTAssertEqual(EdgePathTrimmer.trim(path, fraction: 1).currentPoint.x, 100, accuracy: 0.001)
     }
 
-    private func snapshot(
-        remainingPercent: Int,
-        resetsAt: Date?,
-        fetchedAt: Date
-    ) -> UsageSnapshot {
-        UsageSnapshot(
-            plan: "plus",
-            main: RateBucket(
-                id: "codex",
-                name: "Codex",
-                primary: RateWindow(
-                    usedPercent: 100 - remainingPercent,
-                    durationMinutes: 10_080,
-                    resetsAt: resetsAt
-                ),
-                secondary: nil
-            ),
-            buckets: [],
-            resetCreditCount: nil,
-            resetCredits: [],
-            fetchedAt: fetchedAt
+    /// Matches an actual captured response from `GET /api/oauth/usage`: `utilization` is a
+    /// 0-100 number, `resets_at` is an ISO-8601 string (not a Unix timestamp) — the exact
+    /// shape mismatch that originally produced a garbage "95043D" countdown.
+    func testClaudeUsageParserParsesRealResponseShape() throws {
+        let payload = #"""
+        {
+          "five_hour": {"utilization": 24.0, "resets_at": "2026-09-02T06:50:00.427202+00:00", "limit_dollars": null},
+          "seven_day": {"utilization": 3.0, "resets_at": "2026-09-03T07:00:00.427225+00:00", "limit_dollars": null}
+        }
+        """#.data(using: .utf8)!
+
+        let snapshot = try ClaudeUsageParser().parse(data: payload, capturedAt: Date(timeIntervalSince1970: 100))
+        XCTAssertEqual(snapshot.fiveHour?.usedPercent, 24)
+        let expectedResetsAt = Date(timeIntervalSince1970: 1_788_331_800.427202)
+        XCTAssertEqual(snapshot.fiveHour?.resetsAt?.timeIntervalSince1970 ?? 0, expectedResetsAt.timeIntervalSince1970, accuracy: 0.001)
+        XCTAssertEqual(snapshot.sevenDay?.usedPercent, 3)
+    }
+
+    func testClaudeUsageParserToleratesUsedPercentageFieldName() throws {
+        let payload = #"""
+        {"five_hour": {"used_percentage": 5, "resets_at": "2026-09-02T06:50:00+00:00"}}
+        """#.data(using: .utf8)!
+
+        let snapshot = try ClaudeUsageParser().parse(data: payload)
+        XCTAssertEqual(snapshot.fiveHour?.usedPercent, 5)
+        XCTAssertNil(snapshot.sevenDay)
+    }
+
+    func testClaudeUsageParserScalesFractionToPercent() throws {
+        let payload = #"""
+        {"five_hour": {"utilization": 0.284, "resets_at": "2026-09-02T06:50:00+00:00"}}
+        """#.data(using: .utf8)!
+
+        let snapshot = try ClaudeUsageParser().parse(data: payload)
+        XCTAssertEqual(snapshot.fiveHour?.usedPercent, 28)
+    }
+
+    func testClaudeUsageParserToleratesMissingWindows() throws {
+        let payload = "{}".data(using: .utf8)!
+        let snapshot = try ClaudeUsageParser().parse(data: payload)
+        XCTAssertNil(snapshot.fiveHour)
+        XCTAssertNil(snapshot.sevenDay)
+    }
+
+    func testClaudeUsageParserRejectsUnparseableResponse() {
+        let payload = "not json".data(using: .utf8)!
+        XCTAssertThrowsError(try ClaudeUsageParser().parse(data: payload))
+    }
+
+    func testClaudeTightestWindowPicksLowestRemaining() {
+        let snapshot = ClaudeUsageSnapshot(
+            fiveHour: RateWindow(usedPercent: 80, durationMinutes: nil, resetsAt: nil),
+            sevenDay: RateWindow(usedPercent: 20, durationMinutes: nil, resetsAt: nil),
+            capturedAt: Date()
         )
+        XCTAssertEqual(snapshot.tightest?.usedPercent, 80)
+    }
+
+    func testDetailRowBuilderWindowRow() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        let window = RateWindow(usedPercent: 28, durationMinutes: nil, resetsAt: now.addingTimeInterval(3_600))
+        let row = DetailRowBuilder.windowRow(title: "Claude 5H", window: window, now: now)
+        XCTAssertEqual(row.title, "Claude 5H")
+        XCTAssertEqual(row.value, "剩余 72% · 1H")
+    }
+
+    func testDetailRowBuilderMissingWindow() {
+        let row = DetailRowBuilder.windowRow(title: "Claude 5H", window: nil)
+        XCTAssertEqual(row.value, "暂无额度窗口")
+    }
+
+    func testMeterValueText() {
+        XCTAssertEqual(MeterValue(percent: 52, resetText: "3H").text, "52% 3H")
+    }
+
+    private func window(remainingPercent: Int, resetsAt: Date?) -> RateWindow {
+        RateWindow(usedPercent: 100 - remainingPercent, durationMinutes: 10_080, resetsAt: resetsAt)
     }
 }

@@ -23,16 +23,16 @@ final class QuotaResetNotifier: NSObject, UNUserNotificationCenterDelegate, @unc
         }
     }
 
-    func notify(_ event: QuotaResetEvent) {
+    func notify(_ event: QuotaResetEvent, provider: MeterProvider) {
         let content = UNMutableNotificationContent()
-        content.title = "Codex 额度已重置"
-        content.body = "主额度已恢复至 \(event.currentRemainingPercent)%"
+        content.title = "\(provider.displayName) 额度已重置"
+        content.body = "\(provider.windowLabel)已恢复至 \(event.currentRemainingPercent)%"
         content.sound = .default
-        content.threadIdentifier = "codex-quota"
+        content.threadIdentifier = provider.threadIdentifier
 
         let timestamp = Int(event.detectedAt.timeIntervalSince1970)
         let request = UNNotificationRequest(
-            identifier: "codex-primary-reset-\(timestamp)",
+            identifier: "\(provider.identifierPrefix)-reset-\(timestamp)",
             content: content,
             trigger: nil
         )

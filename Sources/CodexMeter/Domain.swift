@@ -29,6 +29,57 @@ struct UsageSnapshot: Equatable, Sendable {
     let fetchedAt: Date
 }
 
+/// Claude Code 的订阅额度，来自 `ClaudeUsageClient` 对私有 usage 接口的直接请求。
+struct ClaudeUsageSnapshot: Equatable, Sendable {
+    let fiveHour: RateWindow?
+    let sevenDay: RateWindow?
+    let capturedAt: Date
+
+    /// 剩余最少的那个窗口，也就是真正卡住你的那个。收起态右翼显示它。
+    var tightest: RateWindow? {
+        [fiveHour, sevenDay]
+            .compactMap { $0 }
+            .min { $0.remainingPercent < $1.remainingPercent }
+    }
+}
+
+/// Identifies which quota a `QuotaResetEvent` / notification is about.
+enum MeterProvider: Sendable {
+    case codex
+    case claudeFiveHour
+    case claudeSevenDay
+
+    var displayName: String {
+        switch self {
+        case .codex: return "Codex"
+        case .claudeFiveHour, .claudeSevenDay: return "Claude"
+        }
+    }
+
+    var windowLabel: String {
+        switch self {
+        case .codex: return "主额度"
+        case .claudeFiveHour: return "5 小时额度"
+        case .claudeSevenDay: return "周额度"
+        }
+    }
+
+    var threadIdentifier: String {
+        switch self {
+        case .codex: return "codex-quota"
+        case .claudeFiveHour, .claudeSevenDay: return "claude-quota"
+        }
+    }
+
+    var identifierPrefix: String {
+        switch self {
+        case .codex: return "codex-primary"
+        case .claudeFiveHour: return "claude-5h"
+        case .claudeSevenDay: return "claude-7d"
+        }
+    }
+}
+
 struct QuotaResetEvent: Equatable, Sendable {
     let previousRemainingPercent: Int
     let currentRemainingPercent: Int
@@ -39,10 +90,10 @@ enum QuotaResetDetector {
     private static let nearFullRemainingPercent = 90
     private static let meaningfulIncrease = 5
 
-    static func detect(previous: UsageSnapshot?, current: UsageSnapshot) -> QuotaResetEvent? {
+    static func detect(previous: RateWindow?, current: RateWindow?, at detectedAt: Date) -> QuotaResetEvent? {
         guard
-            let previousWindow = previous?.main.primary,
-            let currentWindow = current.main.primary
+            let previousWindow = previous,
+            let currentWindow = current
         else {
             return nil
         }
@@ -73,14 +124,24 @@ enum QuotaResetDetector {
         return QuotaResetEvent(
             previousRemainingPercent: previousRemaining,
             currentRemainingPercent: currentRemaining,
-            detectedAt: current.fetchedAt
+            detectedAt: detectedAt
         )
     }
 }
 
-struct ResetCreditDisplayRow: Equatable, Sendable {
+struct MeterDetailRow: Equatable, Sendable {
     let title: String
-    let expiry: String
+    let value: String
+}
+
+/// A single window's remaining percent + formatted reset countdown, pre-rendered for display —
+/// e.g. the collapsed notch's "52% 3H". `nil` means the window doesn't exist for this account
+/// (not that it failed to load), so callers should omit it rather than showing a placeholder.
+struct MeterValue: Equatable, Sendable {
+    let percent: Int
+    let resetText: String
+
+    var text: String { "\(percent)% \(resetText)" }
 }
 
 enum MeterError: LocalizedError, Sendable {
@@ -90,6 +151,10 @@ enum MeterError: LocalizedError, Sendable {
     case server(String)
     case responseTooLarge
     case invalidResponse
+    case claudeNotLoggedIn
+    case claudeSessionExpired
+    case claudeRequestFailed(String)
+    case claudeResponseUnparseable
 
     var errorDescription: String? {
         switch self {
@@ -106,6 +171,14 @@ enum MeterError: LocalizedError, Sendable {
             return "Codex 返回的数据超过安全限制。"
         case .invalidResponse:
             return "无法解析 Codex 限额数据。"
+        case .claudeNotLoggedIn:
+            return "未找到 Claude Code 登录信息，请先运行 claude 并完成登录。"
+        case .claudeSessionExpired:
+            return "Claude 登录已过期，请打开 Claude Code 刷新登录状态。"
+        case .claudeRequestFailed(let detail):
+            return "Claude 额度接口请求失败：\(detail)"
+        case .claudeResponseUnparseable:
+            return "无法解析 Claude 额度数据。"
         }
     }
 }
@@ -123,12 +196,22 @@ enum CompactTimeFormatter {
     }
 }
 
-enum ResetCreditRowBuilder {
-    static func rows(for snapshot: UsageSnapshot, now: Date = Date()) -> [ResetCreditDisplayRow] {
+enum DurationLabelFormatter {
+    static func label(_ minutes: Int?) -> String {
+        guard let minutes else { return "额度" }
+        if minutes % 10_080 == 0 { return "\(minutes / 10_080) 周" }
+        if minutes % 1_440 == 0 { return "\(minutes / 1_440)D" }
+        if minutes % 60 == 0 { return "\(minutes / 60)H" }
+        return "\(minutes)M"
+    }
+}
+
+enum DetailRowBuilder {
+    static func codexResetCreditRow(for snapshot: UsageSnapshot, now: Date = Date()) -> MeterDetailRow {
         let reportedCount = max(0, snapshot.resetCreditCount ?? 0)
         let total = min(50, max(reportedCount, snapshot.resetCredits.count))
         guard total > 0 else {
-            return [ResetCreditDisplayRow(title: "暂无可用重置卡", expiry: "--")]
+            return MeterDetailRow(title: "暂无可用重置卡", value: "--")
         }
 
         let expirations = snapshot.resetCredits.compactMap(\.expiresAt).sorted()
@@ -136,7 +219,15 @@ enum ResetCreditRowBuilder {
             guard index < expirations.count else { return "--" }
             return CompactTimeFormatter.text(until: expirations[index], now: now)
         }.joined(separator: "/")
-        return [ResetCreditDisplayRow(title: "重置卡", expiry: expiryText)]
+        return MeterDetailRow(title: "重置卡", value: expiryText)
+    }
+
+    static func windowRow(title: String, window: RateWindow?, now: Date = Date()) -> MeterDetailRow {
+        guard let window else {
+            return MeterDetailRow(title: title, value: "暂无额度窗口")
+        }
+        let reset = window.resetsAt.map { CompactTimeFormatter.text(until: $0, now: now) } ?? "未知"
+        return MeterDetailRow(title: title, value: "剩余 \(window.remainingPercent)% · \(reset)")
     }
 }
 
@@ -212,4 +303,55 @@ private struct ResetCreditsSummaryDTO: Decodable {
 
 private struct ResetCreditDTO: Decodable {
     let expiresAt: TimeInterval?
+}
+
+/// 解析 `GET https://api.anthropic.com/api/oauth/usage` 的响应（即 `claude` CLI 的 `/usage`
+/// 命令读取的同一个私有接口）。这是一个未公开文档化的内部接口，实际抓包确认的形状：
+///
+/// ```json
+/// {"five_hour":{"utilization":24.0,"resets_at":"2026-09-02T06:50:00.427202+00:00",...},
+///  "seven_day":{"utilization":3.0,"resets_at":"2026-09-03T07:00:00.427225+00:00",...}}
+/// ```
+///
+/// `utilization` 是 0-100 的整数百分比，`resets_at` 是 ISO-8601 字符串（非 Unix 时间戳）。
+/// 用 `JSONSerialization` 而非严格 `Decodable` 解析，接口细微调整时也不至于直接解析失败。
+struct ClaudeUsageParser: Sendable {
+    func parse(data: Data, capturedAt: Date = Date()) throws -> ClaudeUsageSnapshot {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw MeterError.claudeResponseUnparseable
+        }
+        return ClaudeUsageSnapshot(
+            fiveHour: Self.window(json["five_hour"]),
+            sevenDay: Self.window(json["seven_day"]),
+            capturedAt: capturedAt
+        )
+    }
+
+    private static func window(_ raw: Any?) -> RateWindow? {
+        guard let dict = raw as? [String: Any] else { return nil }
+        guard let rawPercent = (dict["utilization"] as? Double)
+            ?? (dict["used_percentage"] as? Double)
+            ?? (dict["percent"] as? Double)
+        else { return nil }
+        // Observed as a 0-100 value; tolerate a 0-1 fraction too in case that ever varies by field.
+        let usedPercent = rawPercent <= 1 ? rawPercent * 100 : rawPercent
+        let resetsAtString = (dict["resets_at"] as? String) ?? (dict["resetsAt"] as? String)
+        return RateWindow(
+            usedPercent: Int(usedPercent.rounded()),
+            durationMinutes: nil,
+            resetsAt: resetsAtString.flatMap(Self.parseISO8601)
+        )
+    }
+
+    private static func parseISO8601(_ string: String) -> Date? {
+        Self.iso8601WithFractionalSeconds.date(from: string) ?? Self.iso8601.date(from: string)
+    }
+
+    private static let iso8601 = ISO8601DateFormatter()
+
+    private static let iso8601WithFractionalSeconds: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 }

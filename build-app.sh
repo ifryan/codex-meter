@@ -27,6 +27,7 @@ for arch in $ARCHS; do
         -framework AppKit \
         -framework Foundation \
         -framework QuartzCore \
+        -framework Security \
         -framework ServiceManagement \
         -framework UserNotifications \
         "$@" \
