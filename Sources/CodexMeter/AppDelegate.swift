@@ -31,11 +31,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private enum ClaudeLoadState {
+        case idle
+        case loaded(ClaudeUsageSnapshot)
+        case failed(error: Error, previous: ClaudeUsageSnapshot?)
+
+        var snapshot: ClaudeUsageSnapshot? {
+            switch self {
+            case .idle: return nil
+            case .loaded(let snapshot): return snapshot
+            case .failed(_, let previous): return previous
+            }
+        }
+
+        var error: Error? {
+            if case .failed(let error, _) = self { return error }
+            return nil
+        }
+    }
+
     private let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "io.github.ifryan.codexmeter",
         category: "usage"
     )
     private let usageClient = CodexUsageClient()
+    private let claudeUsageClient = ClaudeUsageClient()
     private let resetNotifier = QuotaResetNotifier()
     private let isDemoMode = ProcessInfo.processInfo.arguments.contains("--demo")
         || ProcessInfo.processInfo.environment["CODEX_METER_DEMO"] == "1"
@@ -44,6 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var displayTimer: Timer?
     private var refreshTask: Task<Void, Never>?
     private var state: LoadState = .idle
+    private var claudeState: ClaudeLoadState = .idle
     private var launchAtLoginError: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -64,6 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if isDemoMode {
             let now = Date()
             state = .loaded(Self.demoSnapshot(now: now))
+            claudeState = .loaded(Self.demoClaudeSnapshot(now: now))
             render(now: now)
             return
         }
@@ -91,49 +113,130 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refresh() {
         guard !isDemoMode else { return }
         guard !state.isLoading else { return }
-        let previous = state.snapshot
-        state = .loading(previous: previous)
+        let previousCodex = state.snapshot
+        let previousClaude = claudeState.snapshot
+        state = .loading(previous: previousCodex)
         render()
 
         refreshTask = Task { [weak self] in
             guard let self else { return }
-            do {
-                let snapshot = try await usageClient.fetch()
-                guard !Task.isCancelled else { return }
-                if let resetEvent = QuotaResetDetector.detect(previous: previous, current: snapshot) {
-                    resetNotifier.notify(resetEvent)
-                    logger.info(
-                        "Detected Codex quota reset: \(resetEvent.previousRemainingPercent)% -> \(resetEvent.currentRemainingPercent)%"
-                    )
-                }
-                state = .loaded(snapshot)
-                logger.info("Fetched Codex usage successfully")
-            } catch is CancellationError {
-                return
-            } catch {
-                state = .failed(error: error, previous: previous)
-                logger.error("Failed to fetch Codex usage: \(error.localizedDescription, privacy: .private)")
-            }
+            async let codex: Void = self.fetchCodex(previous: previousCodex)
+            async let claude: Void = self.fetchClaude(previous: previousClaude)
+            _ = await (codex, claude)
+            guard !Task.isCancelled else { return }
             render()
+        }
+    }
+
+    private func fetchCodex(previous: UsageSnapshot?) async {
+        do {
+            let snapshot = try await usageClient.fetch()
+            guard !Task.isCancelled else { return }
+            if let resetEvent = QuotaResetDetector.detect(
+                previous: previous?.main.primary,
+                current: snapshot.main.primary,
+                at: snapshot.fetchedAt
+            ) {
+                resetNotifier.notify(resetEvent, provider: .codex)
+                logger.info(
+                    "Detected Codex quota reset: \(resetEvent.previousRemainingPercent)% -> \(resetEvent.currentRemainingPercent)%"
+                )
+            }
+            state = .loaded(snapshot)
+            logger.info("Fetched Codex usage successfully")
+        } catch is CancellationError {
+        } catch {
+            state = .failed(error: error, previous: previous)
+            logger.error("Failed to fetch Codex usage: \(error.localizedDescription, privacy: .private)")
+        }
+    }
+
+    private func fetchClaude(previous: ClaudeUsageSnapshot?) async {
+        do {
+            let snapshot = try await claudeUsageClient.fetch()
+            guard !Task.isCancelled else { return }
+            if let event = QuotaResetDetector.detect(
+                previous: previous?.fiveHour,
+                current: snapshot.fiveHour,
+                at: snapshot.capturedAt
+            ) {
+                resetNotifier.notify(event, provider: .claudeFiveHour)
+            }
+            if let event = QuotaResetDetector.detect(
+                previous: previous?.sevenDay,
+                current: snapshot.sevenDay,
+                at: snapshot.capturedAt
+            ) {
+                resetNotifier.notify(event, provider: .claudeSevenDay)
+            }
+            claudeState = .loaded(snapshot)
+            logger.info("Fetched Claude usage successfully")
+        } catch is CancellationError {
+        } catch {
+            claudeState = .failed(error: error, previous: previous)
+            logger.error("Failed to fetch Claude usage: \(error.localizedDescription, privacy: .private)")
         }
     }
 
     private func render(now: Date = Date()) {
         guard notchPanel != nil else { return }
-        guard let snapshot = state.snapshot else {
-            notchPanel.setRemainingPercent(nil)
-            notchPanel.setResetText("--H")
-            notchPanel.setResetCredits([ResetCreditDisplayRow(title: "暂无可用重置卡", expiry: "--")])
-            return
+
+        let bucket = state.snapshot?.main
+        notchPanel.setCodex(
+            primary: meterValue(bucket?.primary, now: now),
+            secondary: meterValue(bucket?.secondary, now: now)
+        )
+        notchPanel.setClaude(
+            fiveHour: meterValue(claudeState.snapshot?.fiveHour, now: now),
+            sevenDay: meterValue(claudeState.snapshot?.sevenDay, now: now)
+        )
+
+        notchPanel.setDetailRows(detailRows(now: now))
+    }
+
+    private func meterValue(_ window: RateWindow?, now: Date) -> MeterValue? {
+        guard let window else { return nil }
+        let resetText = window.resetsAt.map { CompactTimeFormatter.text(until: $0, now: now) } ?? "--H"
+        return MeterValue(percent: window.remainingPercent, resetText: resetText)
+    }
+
+    private func detailRows(now: Date) -> [MeterDetailRow] {
+        var rows: [MeterDetailRow] = []
+
+        if let snapshot = state.snapshot {
+            // Only the account-level `main` bucket is shown — `snapshot.buckets` also carries
+            // per-model sub-limits (e.g. a specific model's 5-hour burst cap) that aren't part of
+            // the plan's actual quota and were confusing users into thinking their plan had a
+            // 5-hour window it doesn't.
+            rows.append(contentsOf: codexRows(title: "Codex", bucket: snapshot.main, now: now))
+            rows.append(DetailRowBuilder.codexResetCreditRow(for: snapshot, now: now))
+        } else {
+            rows.append(MeterDetailRow(title: "暂无可用重置卡", value: "--"))
         }
 
-        notchPanel.setRemainingPercent(snapshot.main.primary?.remainingPercent)
-        if let resetAt = snapshot.main.primary?.resetsAt {
-            notchPanel.setResetText(CompactTimeFormatter.text(until: resetAt, now: now))
+        if let claudeSnapshot = claudeState.snapshot {
+            if let fiveHour = claudeSnapshot.fiveHour {
+                rows.append(DetailRowBuilder.windowRow(title: "Claude 5H", window: fiveHour, now: now))
+            }
+            if let sevenDay = claudeSnapshot.sevenDay {
+                rows.append(DetailRowBuilder.windowRow(title: "Claude 7D", window: sevenDay, now: now))
+            }
         } else {
-            notchPanel.setResetText("--H")
+            let message = (claudeState.error as? LocalizedError)?.errorDescription ?? "正在读取 Claude 余量…"
+            rows.append(MeterDetailRow(title: "Claude", value: message))
         }
-        notchPanel.setResetCredits(ResetCreditRowBuilder.rows(for: snapshot, now: now))
+
+        return rows
+    }
+
+    /// One row per window the bucket actually reports — a window that doesn't exist for this
+    /// account (e.g. no weekly limit on this plan) is omitted rather than shown as unavailable.
+    private func codexRows(title: String, bucket: RateBucket, now: Date) -> [MeterDetailRow] {
+        [bucket.primary, bucket.secondary].compactMap { window in
+            guard let window else { return nil }
+            let label = "\(title) \(DurationLabelFormatter.label(window.durationMinutes))"
+            return DetailRowBuilder.windowRow(title: label, window: window, now: now)
+        }
     }
 
     private func makeMenu() -> NSMenu {
@@ -153,17 +256,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(.separator())
         }
 
-        if let snapshot = state.snapshot {
-            append(bucket: snapshot.main, title: "Codex", to: menu)
-            for bucket in snapshot.buckets where bucket.id != snapshot.main.id {
-                menu.addItem(.separator())
-                append(bucket: bucket, title: bucket.name ?? bucket.id, to: menu)
+        if state.snapshot != nil {
+            for row in detailRows(now: Date()) {
+                addDisabled("\(row.title)  \(row.value)", to: menu)
             }
-            if let count = snapshot.resetCreditCount {
-                menu.addItem(.separator())
-                addDisabled("重置卡  \(max(0, count)) 张", to: menu)
+            if let fetchedAt = state.snapshot?.fetchedAt {
+                addDisabled("更新于  \(Self.timeFormatter.string(from: fetchedAt))", to: menu)
             }
-            addDisabled("更新于  \(Self.timeFormatter.string(from: snapshot.fetchedAt))", to: menu)
         } else if state.error == nil {
             addDisabled("正在读取 Codex 余量…", to: menu)
         }
@@ -193,30 +292,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func headingText() -> String {
         if let plan = state.snapshot?.plan { return "Codex 余量 · \(plan.uppercased())" }
         return "Codex 余量"
-    }
-
-    private func append(bucket: RateBucket, title: String, to menu: NSMenu) {
-        addDisabled(title, to: menu)
-        if let primary = bucket.primary {
-            addDisabled(windowText(primary), to: menu)
-        } else {
-            addDisabled("暂无额度窗口", to: menu)
-        }
-        if let secondary = bucket.secondary { addDisabled(windowText(secondary), to: menu) }
-    }
-
-    private func windowText(_ window: RateWindow) -> String {
-        let label = durationLabel(window.durationMinutes)
-        let reset = window.resetsAt.map { Self.resetFormatter.string(from: $0) } ?? "未知"
-        return "\(label)  剩余 \(window.remainingPercent)% · \(reset) 重置"
-    }
-
-    private func durationLabel(_ minutes: Int?) -> String {
-        guard let minutes else { return "额度" }
-        if minutes % 10_080 == 0 { return "\(minutes / 10_080) 周" }
-        if minutes % 1_440 == 0 { return "\(minutes / 1_440)D" }
-        if minutes % 60 == 0 { return "\(minutes / 60)H" }
-        return "\(minutes)M"
     }
 
     private func addDisabled(_ title: String, to menu: NSMenu) {
@@ -272,9 +347,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func quit() { NSApp.terminate(nil) }
 
+    // MARK: - Demo data
+
     private static func demoSnapshot(now: Date) -> UsageSnapshot {
+        // Matches a real Pro-plan account: a single weekly window, no 5-hour window.
         UsageSnapshot(
-            plan: "plus",
+            plan: "pro",
             main: RateBucket(
                 id: "codex",
                 name: "Codex",
@@ -294,17 +372,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
     }
 
+    private static func demoClaudeSnapshot(now: Date) -> ClaudeUsageSnapshot {
+        ClaudeUsageSnapshot(
+            fiveHour: RateWindow(usedPercent: 28, durationMinutes: 300, resetsAt: now.addingTimeInterval(2 * 3_600)),
+            sevenDay: RateWindow(usedPercent: 12, durationMinutes: 10_080, resetsAt: now.addingTimeInterval(4 * 86_400)),
+            capturedAt: now
+        )
+    }
+
     private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "HH:mm"
-        return formatter
-    }()
-
-    private static let resetFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "M月d日 HH:mm"
         return formatter
     }()
 }

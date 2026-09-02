@@ -117,19 +117,31 @@ final class NotchMeterView: NSControl {
     var hoverChanged: ((Bool) -> Void)?
 
     private let iconView = NSImageView()
+    /// Collapsed notch: Codex's top line (e.g. "52% 3D"). Expanded: Codex's big headline value.
     private let valueLabel = NSTextField(labelWithString: "--%")
+    /// Collapsed notch: Codex's second line, only shown when the account has a second window
+    /// (e.g. a 5-hour window alongside the weekly one). Hidden in expanded mode.
+    private let codexSecondaryLabel = NSTextField(labelWithString: "")
+    /// Collapsed notch: Claude's top line. Expanded: Claude's big headline value.
     private let resetLabel = NSTextField(labelWithString: "--H")
+    /// Collapsed notch: Claude's second line (7-day), shown alongside `resetLabel`'s 5-hour line.
+    private let claudeSecondaryLabel = NSTextField(labelWithString: "")
     private let headingLabel = NSTextField(labelWithString: "Codex")
     private let captionLabel = NSTextField(labelWithString: "剩余")
     private let barsView = UsageBarsView()
-    private var resetCreditLeftLabels: [NSTextField] = []
-    private var resetCreditRightLabels: [NSTextField] = []
+    private var detailLeftLabels: [NSTextField] = []
+    private var detailRightLabels: [NSTextField] = []
     private var hoverAreas: [NSTrackingArea] = []
     private var hasNotch = false
     private var notchWidth: CGFloat = 185
     private var notchHeight: CGFloat = 32
     private var isExpanded = false
-    private var edgeProgressPercent: Int?
+    private var codexEdgePercent: Int?
+    private var claudeEdgePercent: Int?
+    private var codexPrimaryValue: MeterValue?
+    private var codexSecondaryValue: MeterValue?
+    private var claudePrimaryValue: MeterValue?
+    private var claudeSecondaryValue: MeterValue?
 
     private var bodyWidth: CGFloat {
         if hasNotch && !isExpanded { return bounds.width }
@@ -155,13 +167,21 @@ final class NotchMeterView: NSControl {
         resetLabel.textColor = .white
         resetLabel.font = AppFont.ubuntuMonoBold(16)
         resetLabel.alignment = .right
+        codexSecondaryLabel.textColor = NSColor.white.withAlphaComponent(0.58)
+        codexSecondaryLabel.font = AppFont.ubuntuMono(10)
+        codexSecondaryLabel.alignment = .left
+        codexSecondaryLabel.isHidden = true
+        claudeSecondaryLabel.textColor = NSColor.white.withAlphaComponent(0.58)
+        claudeSecondaryLabel.font = AppFont.ubuntuMono(10)
+        claudeSecondaryLabel.alignment = .right
+        claudeSecondaryLabel.isHidden = true
         headingLabel.textColor = NSColor.white.withAlphaComponent(0.72)
         headingLabel.font = AppFont.ubuntuMono(12)
         captionLabel.textColor = NSColor.white.withAlphaComponent(0.48)
         captionLabel.font = AppFont.ubuntuMono(11)
 
-        [iconView, valueLabel, resetLabel, headingLabel, captionLabel, barsView].forEach(addSubview)
-        toolTip = "Codex 余量"
+        [iconView, valueLabel, resetLabel, codexSecondaryLabel, claudeSecondaryLabel, headingLabel, captionLabel, barsView].forEach(addSubview)
+        toolTip = "Codex / Claude 余量"
     }
 
     required init?(coder: NSCoder) { nil }
@@ -176,25 +196,85 @@ final class NotchMeterView: NSControl {
         updateTrackingAreas()
     }
 
-    func setRemainingPercent(_ percent: Int?) {
-        edgeProgressPercent = percent.map { max(0, min(100, $0)) }
-        valueLabel.stringValue = edgeProgressPercent.map { "\($0)%" } ?? "--%"
-        barsView.percent = edgeProgressPercent ?? 0
+    func setCodex(primary: MeterValue?, secondary: MeterValue?) {
+        codexEdgePercent = Self.tightestPercent(primary, secondary)
+        (codexPrimaryValue, codexSecondaryValue) = Self.ordered(primary, secondary)
+        barsView.percent = codexEdgePercent ?? 0
+        needsLayout = true
         needsDisplay = true
-        setAccessibilityLabel(edgeProgressPercent.map { "Codex 剩余 \($0)%" } ?? "Codex 余量不可用")
+        updateAccessibilityLabel()
     }
 
-    func setResetText(_ text: String) {
-        resetLabel.stringValue = text
+    func setClaude(fiveHour: MeterValue?, sevenDay: MeterValue?) {
+        claudeEdgePercent = Self.tightestPercent(fiveHour, sevenDay)
+        (claudePrimaryValue, claudeSecondaryValue) = Self.ordered(fiveHour, sevenDay)
+        needsLayout = true
+        needsDisplay = true
+        updateAccessibilityLabel()
     }
 
-    var resetCreditRowCount: Int { resetCreditLeftLabels.count }
+    /// The ring shows a single arc per side, so when both windows are present it tracks
+    /// whichever has less remaining — the one that actually gates further use.
+    private static func tightestPercent(_ a: MeterValue?, _ b: MeterValue?) -> Int? {
+        [a, b].compactMap { $0?.percent }.min().map { max(0, min(100, $0)) }
+    }
 
-    func setResetCredits(_ rows: [ResetCreditDisplayRow]) {
-        resetCreditLeftLabels.forEach { $0.removeFromSuperview() }
-        resetCreditRightLabels.forEach { $0.removeFromSuperview() }
-        resetCreditLeftLabels.removeAll()
-        resetCreditRightLabels.removeAll()
+    /// Drops missing windows so a side with only a weekly quota still renders on the top line.
+    /// Keeps the declared order (five-hour before weekly) rather than sorting by urgency, so the
+    /// readout doesn't reshuffle itself as percentages drift.
+    private static func ordered(_ a: MeterValue?, _ b: MeterValue?) -> (MeterValue?, MeterValue?) {
+        let present = [a, b].compactMap { $0 }
+        return (present.first, present.count > 1 ? present[1] : nil)
+    }
+
+    /// One window as a single line: the percentage carries the weight, the countdown trails it
+    /// in smaller dim type. Two type sizes in one line is what keeps "52% 3H" from reading as
+    /// one mushed-together token.
+    private static func collapsedText(
+        _ value: MeterValue,
+        percentSize: CGFloat,
+        timeSize: CGFloat,
+        alignment: NSTextAlignment
+    ) -> NSAttributedString {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = alignment
+
+        let text = NSMutableAttributedString(string: "\(value.percent)%", attributes: [
+            .font: AppFont.ubuntuMonoBold(percentSize),
+            .foregroundColor: percentColor(value.percent),
+            .paragraphStyle: paragraph
+        ])
+        text.append(NSAttributedString(string: " \(value.resetText)", attributes: [
+            .font: AppFont.ubuntuMono(timeSize),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.45),
+            .paragraphStyle: paragraph
+        ]))
+        return text
+    }
+
+    /// Colour only appears once a quota is worth worrying about, so a healthy meter stays plain
+    /// white rather than decorating every reading.
+    private static func percentColor(_ percent: Int) -> NSColor {
+        switch percent {
+        case 50...: return .white
+        case 20..<50: return NSColor(red: 1.00, green: 0.78, blue: 0.12, alpha: 1)
+        default: return NSColor(red: 1.00, green: 0.45, blue: 0.45, alpha: 1)
+        }
+    }
+
+    private func updateAccessibilityLabel() {
+        let codexText = codexEdgePercent.map { "Codex 剩余 \($0)%" } ?? "Codex 余量不可用"
+        let claudeText = claudeEdgePercent.map { "Claude 剩余 \($0)%" } ?? "Claude 未接入"
+        setAccessibilityLabel("\(codexText)，\(claudeText)")
+    }
+
+    var detailRowCount: Int { detailLeftLabels.count }
+
+    func setDetailRows(_ rows: [MeterDetailRow]) {
+        detailLeftLabels.forEach { $0.removeFromSuperview() }
+        detailRightLabels.forEach { $0.removeFromSuperview() }
+        detailLeftLabels.removeAll()
+        detailRightLabels.removeAll()
 
         for row in rows {
             let left = NSTextField(labelWithString: row.title)
@@ -202,7 +282,7 @@ final class NotchMeterView: NSControl {
             left.font = AppFont.ubuntuMono(12)
             left.lineBreakMode = .byTruncatingTail
 
-            let right = NSTextField(labelWithString: row.expiry)
+            let right = NSTextField(labelWithString: row.value)
             right.textColor = NSColor.white.withAlphaComponent(0.62)
             right.font = AppFont.ubuntuMono(12)
             right.alignment = .right
@@ -210,8 +290,8 @@ final class NotchMeterView: NSControl {
 
             addSubview(left)
             addSubview(right)
-            resetCreditLeftLabels.append(left)
-            resetCreditRightLabels.append(right)
+            detailLeftLabels.append(left)
+            detailRightLabels.append(right)
         }
         needsLayout = true
     }
@@ -219,15 +299,18 @@ final class NotchMeterView: NSControl {
     override func layout() {
         super.layout()
         let bodyX = (bounds.width - bodyWidth) / 2
-        valueLabel.font = AppFont.ubuntuMonoBold(16)
 
         if isExpanded {
+            valueLabel.font = AppFont.ubuntuMonoBold(16)
+            resetLabel.font = AppFont.ubuntuMonoBold(16)
             iconView.isHidden = true
             headingLabel.isHidden = true
             captionLabel.isHidden = true
             barsView.isHidden = true
             valueLabel.isHidden = false
             resetLabel.isHidden = false
+            codexSecondaryLabel.isHidden = true
+            claudeSecondaryLabel.isHidden = true
 
             if hasNotch {
                 layoutNotchTopLabels()
@@ -236,12 +319,12 @@ final class NotchMeterView: NSControl {
                 resetLabel.frame = NSRect(x: bodyX + bodyWidth - 110, y: bodyHeight - 28, width: 90, height: 22)
             }
 
-            for index in resetCreditLeftLabels.indices {
+            for index in detailLeftLabels.indices {
                 let rowY = hasNotch ? bodyHeight - 27 - CGFloat(index * 22) : 14 - CGFloat(index * 22)
-                resetCreditLeftLabels[index].isHidden = false
-                resetCreditRightLabels[index].isHidden = false
-                resetCreditLeftLabels[index].frame = NSRect(x: bodyX + 20, y: rowY, width: 120, height: 18)
-                resetCreditRightLabels[index].frame = NSRect(
+                detailLeftLabels[index].isHidden = false
+                detailRightLabels[index].isHidden = false
+                detailLeftLabels[index].frame = NSRect(x: bodyX + 20, y: rowY, width: 120, height: 18)
+                detailRightLabels[index].frame = NSRect(
                     x: bodyX + bodyWidth - 160,
                     y: rowY,
                     width: 140,
@@ -252,9 +335,11 @@ final class NotchMeterView: NSControl {
         }
 
         valueLabel.isHidden = false
-        resetCreditLeftLabels.forEach { $0.isHidden = true; $0.frame = .zero }
-        resetCreditRightLabels.forEach { $0.isHidden = true; $0.frame = .zero }
+        detailLeftLabels.forEach { $0.isHidden = true; $0.frame = .zero }
+        detailRightLabels.forEach { $0.isHidden = true; $0.frame = .zero }
         if hasNotch {
+            valueLabel.font = AppFont.ubuntuMonoBold(12)
+            resetLabel.font = AppFont.ubuntuMonoBold(12)
             iconView.isHidden = true
             resetLabel.isHidden = false
             headingLabel.isHidden = true
@@ -265,6 +350,12 @@ final class NotchMeterView: NSControl {
             captionLabel.frame = .zero
             barsView.frame = .zero
         } else {
+            valueLabel.font = AppFont.ubuntuMonoBold(16)
+            // This fallback pill only has room for Codex's headline percent — the two-line
+            // breakdown is reserved for the notch wings, where there's room for it.
+            valueLabel.stringValue = codexEdgePercent.map { "\($0)%" } ?? "--%"
+            codexSecondaryLabel.isHidden = true
+            claudeSecondaryLabel.isHidden = true
             iconView.isHidden = false
             resetLabel.isHidden = true
             headingLabel.isHidden = false
@@ -279,21 +370,122 @@ final class NotchMeterView: NSControl {
         }
     }
 
+    /// In collapsed notch mode, a side with two windows splits into two stacked lines (primary
+    /// on top, brighter; secondary below, dimmer) instead of cramming both onto one line. A side
+    /// with only one window gets that line centered across the full wing height, as before.
+    /// Expanded mode always uses the single-line form — full detail lives in the rows below.
+    /// Collapsed notch: each wing is a small stat block, one line per quota window, vertically
+    /// centred in the notch band so a side with one window and a side with two still look like
+    /// the same design rather than a rendering glitch. Expanded mode drops back to a single plain
+    /// headline per side, because the full breakdown is already listed in the rows underneath.
+    /// Collapsed notch: each wing is sized to its own data — a wing reporting two windows stacks
+    /// them as a centred block, a wing reporting one centres that single reading in the notch band
+    /// so it never looks top-heavy against an empty second row.
     private func layoutNotchTopLabels() {
         let wingWidth = (bounds.width - notchWidth) / 2
-        let outerPadding: CGFloat = 20
+        let outerPadding: CGFloat = 14
         let labelWidth = max(0, wingWidth - outerPadding)
-        let topLabelY = bounds.height - notchHeight
+        let rightX = wingWidth + notchWidth
+        let bandBottom = bounds.height - notchHeight
 
-        valueLabel.alignment = .left
-        valueLabel.frame = NSRect(x: outerPadding, y: topLabelY, width: labelWidth, height: 22)
-        resetLabel.alignment = .right
-        resetLabel.frame = NSRect(
-            x: wingWidth + notchWidth,
-            y: topLabelY,
+        if isExpanded {
+            valueLabel.alignment = .left
+            valueLabel.stringValue = codexPrimaryValue?.text ?? "--%"
+            valueLabel.frame = NSRect(x: outerPadding, y: bandBottom, width: labelWidth, height: 22)
+            resetLabel.alignment = .right
+            resetLabel.stringValue = claudePrimaryValue?.text ?? "--%"
+            resetLabel.frame = NSRect(x: rightX, y: bandBottom, width: labelWidth, height: 22)
+            codexSecondaryLabel.isHidden = true
+            claudeSecondaryLabel.isHidden = true
+            return
+        }
+
+        layoutWing(
+            primaryLabel: valueLabel,
+            secondaryLabel: codexSecondaryLabel,
+            primary: codexPrimaryValue,
+            secondary: codexSecondaryValue,
+            x: outerPadding,
             width: labelWidth,
-            height: 22
+            bandBottom: bandBottom,
+            alignment: .left
         )
+        layoutWing(
+            primaryLabel: resetLabel,
+            secondaryLabel: claudeSecondaryLabel,
+            primary: claudePrimaryValue,
+            secondary: claudeSecondaryValue,
+            x: rightX,
+            width: labelWidth,
+            bandBottom: bandBottom,
+            alignment: .right
+        )
+    }
+
+    private func layoutWing(
+        primaryLabel: NSTextField,
+        secondaryLabel: NSTextField,
+        primary: MeterValue?,
+        secondary: MeterValue?,
+        x: CGFloat,
+        width: CGFloat,
+        bandBottom: CGFloat,
+        alignment: NSTextAlignment
+    ) {
+        primaryLabel.alignment = alignment
+        secondaryLabel.alignment = alignment
+
+        guard let primary else {
+            let height: CGFloat = 15
+            primaryLabel.stringValue = "--%"
+            primaryLabel.frame = NSRect(
+                x: x,
+                y: bandBottom + (notchHeight - height) / 2,
+                width: width,
+                height: height
+            )
+            secondaryLabel.isHidden = true
+            return
+        }
+
+        guard let secondary else {
+            let height: CGFloat = 15
+            primaryLabel.attributedStringValue = Self.collapsedText(
+                primary,
+                percentSize: 12.5,
+                timeSize: 10,
+                alignment: alignment
+            )
+            primaryLabel.frame = NSRect(
+                x: x,
+                y: bandBottom + (notchHeight - height) / 2,
+                width: width,
+                height: height
+            )
+            secondaryLabel.isHidden = true
+            return
+        }
+
+        let firstRowHeight: CGFloat = 13
+        let secondRowHeight: CGFloat = 12
+        let block = firstRowHeight + secondRowHeight
+        let blockTop = bandBottom + (notchHeight + block) / 2
+
+        primaryLabel.attributedStringValue = Self.collapsedText(
+            primary,
+            percentSize: 11.5,
+            timeSize: 9,
+            alignment: alignment
+        )
+        primaryLabel.frame = NSRect(x: x, y: blockTop - firstRowHeight, width: width, height: firstRowHeight)
+        secondaryLabel.attributedStringValue = Self.collapsedText(
+            secondary,
+            percentSize: 10.5,
+            timeSize: 8.5,
+            alignment: alignment
+        )
+        secondaryLabel.frame = NSRect(x: x, y: blockTop - block, width: width, height: secondRowHeight)
+        secondaryLabel.isHidden = false
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -326,7 +518,10 @@ final class NotchMeterView: NSControl {
         return path
     }
 
-    private func fullEdgePath() -> NSBezierPath {
+    /// Half the notch outline, starting at the top-left corner and growing down/inward to the
+    /// bottom midpoint. Fed to `EdgePathTrimmer`, this draws Codex's ring "growing" from the
+    /// top-left corner — mirrored by `rightEdgePath()` for Claude.
+    private func leftEdgePath() -> NSBezierPath {
         let path = NSBezierPath()
         let inset: CGFloat = 0.75
         let topRadius: CGFloat = 6
@@ -334,16 +529,33 @@ final class NotchMeterView: NSControl {
         let topY = bounds.maxY - inset
         let bottomY = bounds.minY + inset
         let leftVerticalX = bounds.minX + topRadius + inset
-        let rightVerticalX = bounds.maxX - topRadius - inset
+        let midX = bounds.midX
 
         path.move(to: NSPoint(x: bounds.minX + inset, y: topY))
         appendQuadratic(to: NSPoint(x: leftVerticalX, y: topY - topRadius), control: NSPoint(x: leftVerticalX, y: topY), on: path)
         path.line(to: NSPoint(x: leftVerticalX, y: bottomY + bottomRadius))
         appendQuadratic(to: NSPoint(x: leftVerticalX + bottomRadius, y: bottomY), control: NSPoint(x: leftVerticalX, y: bottomY), on: path)
-        path.line(to: NSPoint(x: rightVerticalX - bottomRadius, y: bottomY))
-        appendQuadratic(to: NSPoint(x: rightVerticalX, y: bottomY + bottomRadius), control: NSPoint(x: rightVerticalX, y: bottomY), on: path)
-        path.line(to: NSPoint(x: rightVerticalX, y: topY - topRadius))
-        appendQuadratic(to: NSPoint(x: bounds.maxX - inset, y: topY), control: NSPoint(x: rightVerticalX, y: topY), on: path)
+        path.line(to: NSPoint(x: midX, y: bottomY))
+        return path
+    }
+
+    /// Mirror of `leftEdgePath()`: starts at the top-right corner, grows down/inward to the
+    /// bottom midpoint.
+    private func rightEdgePath() -> NSBezierPath {
+        let path = NSBezierPath()
+        let inset: CGFloat = 0.75
+        let topRadius: CGFloat = 6
+        let bottomRadius: CGFloat = 14
+        let topY = bounds.maxY - inset
+        let bottomY = bounds.minY + inset
+        let rightVerticalX = bounds.maxX - topRadius - inset
+        let midX = bounds.midX
+
+        path.move(to: NSPoint(x: bounds.maxX - inset, y: topY))
+        appendQuadratic(to: NSPoint(x: rightVerticalX, y: topY - topRadius), control: NSPoint(x: rightVerticalX, y: topY), on: path)
+        path.line(to: NSPoint(x: rightVerticalX, y: bottomY + bottomRadius))
+        appendQuadratic(to: NSPoint(x: rightVerticalX - bottomRadius, y: bottomY), control: NSPoint(x: rightVerticalX, y: bottomY), on: path)
+        path.line(to: NSPoint(x: midX, y: bottomY))
         return path
     }
 
@@ -355,36 +567,17 @@ final class NotchMeterView: NSControl {
     }
 
     private func drawCollapsedEdgeProgress() {
-        guard let edgeProgressPercent, edgeProgressPercent > 0 else { return }
-        let fullPath = fullEdgePath()
-        let progress = EdgePathTrimmer.trim(fullPath, fraction: CGFloat(edgeProgressPercent) / 100)
+        drawEdgeRing(percent: codexEdgePercent, fullPath: leftEdgePath())
+        drawEdgeRing(percent: claudeEdgePercent, fullPath: rightEdgePath())
+    }
+
+    private func drawEdgeRing(percent: Int?, fullPath: NSBezierPath) {
+        guard let percent, percent > 0 else { return }
+        let progress = EdgePathTrimmer.trim(fullPath, fraction: CGFloat(percent) / 100)
         progress.lineCapStyle = .round
         progress.lineJoinStyle = .round
 
-        let palette: (start: NSColor, middle: NSColor, end: NSColor, glow: NSColor)
-        switch edgeProgressPercent {
-        case 50...:
-            palette = (
-                NSColor(red: 0.08, green: 0.66, blue: 0.36, alpha: 1),
-                NSColor(red: 0.22, green: 0.94, blue: 0.52, alpha: 1),
-                NSColor(red: 0.76, green: 1.00, blue: 0.84, alpha: 1),
-                NSColor(red: 0.20, green: 0.92, blue: 0.50, alpha: 1)
-            )
-        case 20..<50:
-            palette = (
-                NSColor(red: 0.94, green: 0.52, blue: 0.05, alpha: 1),
-                NSColor(red: 1.00, green: 0.78, blue: 0.12, alpha: 1),
-                NSColor(red: 1.00, green: 0.95, blue: 0.58, alpha: 1),
-                NSColor(red: 1.00, green: 0.72, blue: 0.10, alpha: 1)
-            )
-        default:
-            palette = (
-                NSColor(red: 0.82, green: 0.12, blue: 0.20, alpha: 1),
-                NSColor(red: 1.00, green: 0.28, blue: 0.30, alpha: 1),
-                NSColor(red: 1.00, green: 0.72, blue: 0.68, alpha: 1),
-                NSColor(red: 1.00, green: 0.24, blue: 0.28, alpha: 1)
-            )
-        }
+        let palette = Self.ringPalette(forRemainingPercent: percent)
 
         progress.lineWidth = 6
         palette.glow.withAlphaComponent(0.13).setStroke()
@@ -409,6 +602,32 @@ final class NotchMeterView: NSControl {
             )
         }
         context.restoreGState()
+    }
+
+    private static func ringPalette(forRemainingPercent percent: Int) -> (start: NSColor, middle: NSColor, end: NSColor, glow: NSColor) {
+        switch percent {
+        case 50...:
+            return (
+                NSColor(red: 0.08, green: 0.66, blue: 0.36, alpha: 1),
+                NSColor(red: 0.22, green: 0.94, blue: 0.52, alpha: 1),
+                NSColor(red: 0.76, green: 1.00, blue: 0.84, alpha: 1),
+                NSColor(red: 0.20, green: 0.92, blue: 0.50, alpha: 1)
+            )
+        case 20..<50:
+            return (
+                NSColor(red: 0.94, green: 0.52, blue: 0.05, alpha: 1),
+                NSColor(red: 1.00, green: 0.78, blue: 0.12, alpha: 1),
+                NSColor(red: 1.00, green: 0.95, blue: 0.58, alpha: 1),
+                NSColor(red: 1.00, green: 0.72, blue: 0.10, alpha: 1)
+            )
+        default:
+            return (
+                NSColor(red: 0.82, green: 0.12, blue: 0.20, alpha: 1),
+                NSColor(red: 1.00, green: 0.28, blue: 0.30, alpha: 1),
+                NSColor(red: 1.00, green: 0.72, blue: 0.68, alpha: 1),
+                NSColor(red: 1.00, green: 0.24, blue: 0.28, alpha: 1)
+            )
+        }
     }
 
     override func updateTrackingAreas() {
@@ -502,8 +721,8 @@ final class NotchPanelController {
         }
     }
 
-    func setRemainingPercent(_ percent: Int?) { meterView.setRemainingPercent(percent) }
-    func setResetText(_ text: String) { meterView.setResetText(text) }
+    func setCodex(primary: MeterValue?, secondary: MeterValue?) { meterView.setCodex(primary: primary, secondary: secondary) }
+    func setClaude(fiveHour: MeterValue?, sevenDay: MeterValue?) { meterView.setClaude(fiveHour: fiveHour, sevenDay: sevenDay) }
 
     func invalidate() {
         pendingCollapse?.cancel()
@@ -511,8 +730,8 @@ final class NotchPanelController {
         hoverPollTimer = nil
     }
 
-    func setResetCredits(_ rows: [ResetCreditDisplayRow]) {
-        meterView.setResetCredits(rows)
+    func setDetailRows(_ rows: [MeterDetailRow]) {
+        meterView.setDetailRows(rows)
         if isExpanded { applyFrame(animated: true) }
     }
 
@@ -569,10 +788,10 @@ final class NotchPanelController {
 
     private func applyFrame(animated: Bool) {
         guard let screen else { return }
-        let collapsedWidth: CGFloat = hasNotch ? notchWidth + 128 : 272
+        let collapsedWidth: CGFloat = hasNotch ? notchWidth + 168 : 272
         let panelWidth: CGFloat = isExpanded ? max(collapsedWidth, 320) : collapsedWidth
         let collapsedHeight: CGFloat = hasNotch ? notchHeight + 2 : 62
-        let expandedBodyHeight = max(42, 16 + CGFloat(meterView.resetCreditRowCount * 22))
+        let expandedBodyHeight = max(42, 16 + CGFloat(meterView.detailRowCount * 22))
         let panelHeight: CGFloat = isExpanded ? (hasNotch ? notchHeight + expandedBodyHeight : 78) : collapsedHeight
         let centerX: CGFloat
         if hasNotch, let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
