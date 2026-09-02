@@ -8,7 +8,7 @@ import Security
 enum ClaudeTokenSource: Equatable, Sendable {
     /// `CODEX_METER_CLAUDE_TOKEN` — mostly for development and CI.
     case environment
-    /// A long-lived token from `claude setup-token`, stored in this app's own Keychain item.
+    /// A manually provisioned long-lived token in this app's own Keychain item.
     case longLived
     /// Claude Code's own rotating OAuth session, read out of its Keychain item.
     case claudeCode
@@ -22,9 +22,11 @@ enum ClaudeTokenSource: Equatable, Sendable {
 /// limited (it answers 429 when the CLI has refreshed recently) and writing the item back would
 /// race Claude Code's own refresh-token rotation, which can invalidate the login outright.
 ///
-/// Instead the preferred source is a long-lived token from `claude setup-token`, kept in a separate
-/// Keychain item that only this app writes. Claude Code's session token stays as a zero-config
-/// fallback. Both are read-only with respect to Claude Code's item.
+/// Note that `claude setup-token` is *not* a usable substitute: the usage endpoint requires the
+/// `user:profile` scope, and that command mints an inference-only token, so it answers 403
+/// ("OAuth token does not meet scope requirement user:profile"). The override sources below exist
+/// for a token that does carry `user:profile` — obtained through a separate OAuth authorization —
+/// and are checked first so such a token can bypass Claude Code's short-lived session entirely.
 enum ClaudeCredentialsStore {
     struct Credentials {
         let accessToken: String
@@ -34,9 +36,9 @@ enum ClaudeCredentialsStore {
 
     /// Claude Code's own Keychain item. We only ever read this one.
     private static let claudeCodeService = "Claude Code-credentials"
-    /// Our own item, holding the long-lived `claude setup-token` value as a bare string.
+    /// Our own item, holding a manually provisioned long-lived token as a bare string.
     static let longLivedService = "CodexMeter Claude Token"
-    static let longLivedAccount = "claude-setup-token"
+    static let longLivedAccount = "claude-usage-token"
 
     static func read() -> Credentials? {
         if let token = ProcessInfo.processInfo.environment["CODEX_METER_CLAUDE_TOKEN"],
@@ -44,8 +46,8 @@ enum ClaudeCredentialsStore {
             return Credentials(accessToken: token, expiresAt: nil, source: .environment)
         }
         if let token = readLongLivedToken() {
-            // `claude setup-token` tokens carry a ~1 year expiry that isn't stored alongside them,
-            // so we treat them as non-expiring and let a 401 be the signal to re-provision.
+            // No expiry is stored alongside it, so we treat it as non-expiring and let a 401/403
+            // be the signal to re-provision.
             return Credentials(accessToken: token, expiresAt: nil, source: .longLived)
         }
         return readClaudeCodeSession()

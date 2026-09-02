@@ -50,25 +50,24 @@ Claude Code 没有 Codex 那样的本地 JSON-RPC 接口。Codex Meter 复用 `c
 - 首次读取钥匙串时，系统会弹出标准的“允许访问”授权提示，需要手动允许一次；
 - 这是一个未公开文档化的私有接口，字段形状可能随 Claude Code 版本变化而调整。
 
-### 推荐：配置长期令牌
+### 令牌有效期的限制
 
-`claude` CLI 的会话令牌只有约 8 小时有效期，且**只在 Claude Code 实际运行时**才会续期。如果你一段时间没用 Claude Code，Codex Meter 就读不到有效令牌，5 小时 / 7 天两个数字会停留在上次的缓存值。
+`claude` CLI 的会话令牌只有约 8 小时有效期，且**只在 Claude Code 实际运行时**才会续期。如果你一段时间没用 Claude Code，Codex Meter 就读不到有效令牌，5 小时 / 7 天两个数字会停留在上次的缓存值（面板会标注数据年龄）。正常使用一次 `claude` 即可触发续期并恢复。
 
-配置一个长期令牌可以彻底避免这个问题：
+`claude setup-token` 生成的长期令牌**不能**用于这个接口：usage 接口要求 `user:profile` 权限，而该命令签发的是仅含推理权限的令牌，请求会返回：
 
-```sh
-claude setup-token          # 按提示完成授权，复制输出的 sk-ant-oat01-... 令牌
-security add-generic-password -U \
-  -s "CodexMeter Claude Token" -a "claude-setup-token" -w "<粘贴令牌>"
+```
+403 permission_error
+OAuth token does not meet scope requirement user:profile
 ```
 
-令牌存在独立的钥匙串条目里，只有 Codex Meter 读写，不与 Claude Code 的登录态相互影响。令牌解析优先级为：环境变量 `CODEX_METER_CLAUDE_TOKEN` → 长期令牌 → Claude Code 会话令牌，任一层不可用都会自动回退到下一层。
+令牌解析优先级为：环境变量 `CODEX_METER_CLAUDE_TOKEN` → 钥匙串条目 `CodexMeter Claude Token` → Claude Code 会话令牌，任一层不可用都会自动回退到下一层。前两层供自行获取的、确实带 `user:profile` 权限的令牌使用；没有配置时走第三层，无需任何设置。
 
 ### 取不到数据时的表现
 
 - 每次成功拉取都会把快照缓存到 `~/Library/Application Support/CodexMeter/claude-usage.json`，取不到新数据时继续显示上次的数值，并在明细面板标注“X 小时前”和具体原因，而不是直接空白（超过 7 天的缓存视为无效）；
-- 会话令牌过期时提示配置长期令牌；正常使用一次 `claude` 也能触发它自己续期，下次刷新即可恢复；
-- 长期令牌被拒绝时提示重新运行 `claude setup-token`。
+- 会话令牌过期时提示正常使用一次 Claude Code 触发续期，下次刷新即可恢复；
+- 令牌因权限不足被拒时单独提示，便于和「过期」区分。
 
 完整说明见 [PRIVACY.md](PRIVACY.md)。
 

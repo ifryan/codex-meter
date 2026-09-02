@@ -175,9 +175,9 @@ enum MeterError: LocalizedError, Sendable {
         case .claudeNotLoggedIn:
             return "未找到 Claude Code 登录信息，请先运行 claude 并完成登录。"
         case .claudeSessionExpired:
-            return "Claude 会话令牌已过期。运行 claude setup-token 配置长期令牌可避免再次中断。"
+            return "Claude 会话令牌已过期，正常使用一次 Claude Code 即可触发续期。"
         case .claudeTokenRejected:
-            return "Claude 长期令牌被拒绝，请重新运行 claude setup-token 并更新。"
+            return "Claude 令牌无效或缺少 user:profile 权限。"
         case .claudeRequestFailed(let detail):
             return "Claude 额度接口请求失败：\(detail)"
         case .claudeResponseUnparseable:
