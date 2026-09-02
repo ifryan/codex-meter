@@ -48,8 +48,27 @@ Claude Code 没有 Codex 那样的本地 JSON-RPC 接口。Codex Meter 复用 `c
 
 - 只读：Codex Meter 从不写入这个钥匙串条目，也不会做令牌刷新（避免和 `claude` CLI 自身的令牌轮换互相冲突）；
 - 首次读取钥匙串时，系统会弹出标准的“允许访问”授权提示，需要手动允许一次；
-- 如果登录令牌已过期，菜单会显示“Claude 登录已过期，请打开 Claude Code 刷新登录状态”——只需正常使用一次 `claude`（命令行或任意客户端）触发它自己的登录刷新，Codex Meter 下一次刷新就能读到新令牌；
 - 这是一个未公开文档化的私有接口，字段形状可能随 Claude Code 版本变化而调整。
+
+### 推荐：配置长期令牌
+
+`claude` CLI 的会话令牌只有约 8 小时有效期，且**只在 Claude Code 实际运行时**才会续期。如果你一段时间没用 Claude Code，Codex Meter 就读不到有效令牌，5 小时 / 7 天两个数字会停留在上次的缓存值。
+
+配置一个长期令牌可以彻底避免这个问题：
+
+```sh
+claude setup-token          # 按提示完成授权，复制输出的 sk-ant-oat01-... 令牌
+security add-generic-password -U \
+  -s "CodexMeter Claude Token" -a "claude-setup-token" -w "<粘贴令牌>"
+```
+
+令牌存在独立的钥匙串条目里，只有 Codex Meter 读写，不与 Claude Code 的登录态相互影响。令牌解析优先级为：环境变量 `CODEX_METER_CLAUDE_TOKEN` → 长期令牌 → Claude Code 会话令牌，任一层不可用都会自动回退到下一层。
+
+### 取不到数据时的表现
+
+- 每次成功拉取都会把快照缓存到 `~/Library/Application Support/CodexMeter/claude-usage.json`，取不到新数据时继续显示上次的数值，并在明细面板标注“X 小时前”和具体原因，而不是直接空白（超过 7 天的缓存视为无效）；
+- 会话令牌过期时提示配置长期令牌；正常使用一次 `claude` 也能触发它自己续期，下次刷新即可恢复；
+- 长期令牌被拒绝时提示重新运行 `claude setup-token`。
 
 完整说明见 [PRIVACY.md](PRIVACY.md)。
 
@@ -124,7 +143,8 @@ CODEX_METER_CODEX_PATH=/absolute/path/to/codex \
 Sources/CodexMeter/
 ├── Domain.swift              数据模型、Codable 协议和格式化
 ├── CodexUsageClient.swift    Codex 子进程与 JSON-RPC transport
-├── ClaudeUsageClient.swift   读取钥匙串登录态并请求 Claude 私有 usage 接口
+├── ClaudeUsageClient.swift   解析令牌来源并请求 Claude 私有 usage 接口
+├── ClaudeSnapshotCache.swift 缓存最近一次成功的 Claude 快照，供降级显示
 ├── NotchUI.swift             刘海绘制、双环路径进度和窗口控制
 ├── AppDelegate.swift         状态机、刷新、菜单和登录项
 ├── QuotaResetNotifier.swift  额度重置系统通知

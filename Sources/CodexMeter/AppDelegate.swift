@@ -56,6 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
     private let usageClient = CodexUsageClient()
     private let claudeUsageClient = ClaudeUsageClient()
+    private let claudeSnapshotCache = ClaudeSnapshotCache()
     private let resetNotifier = QuotaResetNotifier()
     private let isDemoMode = ProcessInfo.processInfo.arguments.contains("--demo")
         || ProcessInfo.processInfo.environment["CODEX_METER_DEMO"] == "1"
@@ -91,6 +92,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         resetNotifier.prepare()
+        // Seed from the cache so the first paint has numbers even before the network call lands
+        // (and so a restart doesn't look like a quota reset to the detector).
+        if let cached = claudeSnapshotCache.load() {
+            claudeState = .loaded(cached)
+        }
         render()
         refresh()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 5 * 60, repeats: true) { [weak self] _ in
@@ -170,6 +176,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 resetNotifier.notify(event, provider: .claudeSevenDay)
             }
             claudeState = .loaded(snapshot)
+            claudeSnapshotCache.save(snapshot)
             logger.info("Fetched Claude usage successfully")
         } catch is CancellationError {
         } catch {
@@ -220,6 +227,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if let sevenDay = claudeSnapshot.sevenDay {
                 rows.append(DetailRowBuilder.windowRow(title: "Claude 7D", window: sevenDay, now: now))
+            }
+            // These numbers may be the cached ones from a previous run, so say how old they are
+            // rather than letting a stale percentage pass as current.
+            if now.timeIntervalSince(claudeSnapshot.capturedAt) > StalenessFormatter.freshnessThreshold {
+                let age = StalenessFormatter.ageText(since: claudeSnapshot.capturedAt, now: now)
+                let reason = (claudeState.error as? LocalizedError)?.errorDescription
+                rows.append(MeterDetailRow(title: "Claude 数据", value: reason.map { "\(age) · \($0)" } ?? "\(age)"))
             }
         } else {
             let message = (claudeState.error as? LocalizedError)?.errorDescription ?? "正在读取 Claude 余量…"

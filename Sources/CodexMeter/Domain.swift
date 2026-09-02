@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
 
-struct RateWindow: Equatable, Sendable {
+struct RateWindow: Equatable, Sendable, Codable {
     let usedPercent: Int
     let durationMinutes: Int?
     let resetsAt: Date?
@@ -30,7 +30,7 @@ struct UsageSnapshot: Equatable, Sendable {
 }
 
 /// Claude Code 的订阅额度，来自 `ClaudeUsageClient` 对私有 usage 接口的直接请求。
-struct ClaudeUsageSnapshot: Equatable, Sendable {
+struct ClaudeUsageSnapshot: Equatable, Sendable, Codable {
     let fiveHour: RateWindow?
     let sevenDay: RateWindow?
     let capturedAt: Date
@@ -155,6 +155,7 @@ enum MeterError: LocalizedError, Sendable {
     case claudeSessionExpired
     case claudeRequestFailed(String)
     case claudeResponseUnparseable
+    case claudeTokenRejected
 
     var errorDescription: String? {
         switch self {
@@ -174,7 +175,9 @@ enum MeterError: LocalizedError, Sendable {
         case .claudeNotLoggedIn:
             return "未找到 Claude Code 登录信息，请先运行 claude 并完成登录。"
         case .claudeSessionExpired:
-            return "Claude 登录已过期，请打开 Claude Code 刷新登录状态。"
+            return "Claude 会话令牌已过期。运行 claude setup-token 配置长期令牌可避免再次中断。"
+        case .claudeTokenRejected:
+            return "Claude 长期令牌被拒绝，请重新运行 claude setup-token 并更新。"
         case .claudeRequestFailed(let detail):
             return "Claude 额度接口请求失败：\(detail)"
         case .claudeResponseUnparseable:
@@ -320,9 +323,14 @@ struct ClaudeUsageParser: Sendable {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw MeterError.claudeResponseUnparseable
         }
+        // The response carries the same two numbers twice: the legacy `five_hour` / `seven_day`
+        // objects and a newer `limits` array keyed by `kind`. Prefer the legacy objects (still
+        // authoritative today) and fall back to the array so a rename of either shape alone
+        // doesn't blank the meter.
+        let limits = json["limits"] as? [[String: Any]] ?? []
         return ClaudeUsageSnapshot(
-            fiveHour: Self.window(json["five_hour"]),
-            sevenDay: Self.window(json["seven_day"]),
+            fiveHour: Self.window(json["five_hour"]) ?? Self.window(limits.first { $0["kind"] as? String == "session" }),
+            sevenDay: Self.window(json["seven_day"]) ?? Self.window(limits.first { $0["kind"] as? String == "weekly_all" }),
             capturedAt: capturedAt
         )
     }

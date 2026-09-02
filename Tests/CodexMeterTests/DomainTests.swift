@@ -145,6 +145,74 @@ final class DomainTests: XCTestCase {
         XCTAssertNil(snapshot.sevenDay)
     }
 
+    /// The live endpoint reports the same two numbers again under `limits`; that array is the
+    /// fallback if the legacy top-level objects ever disappear.
+    func testClaudeUsageParserFallsBackToLimitsArray() throws {
+        let payload = #"""
+        {
+          "five_hour": null,
+          "seven_day": null,
+          "limits": [
+            {"kind": "session", "percent": 17, "resets_at": "2026-09-02T21:30:00.343519+00:00"},
+            {"kind": "weekly_all", "percent": 12, "resets_at": "2026-09-03T07:00:00.343543+00:00"}
+          ]
+        }
+        """#.data(using: .utf8)!
+
+        let snapshot = try ClaudeUsageParser().parse(data: payload)
+        XCTAssertEqual(snapshot.fiveHour?.usedPercent, 17)
+        XCTAssertEqual(snapshot.sevenDay?.usedPercent, 12)
+        XCTAssertNotNil(snapshot.fiveHour?.resetsAt)
+    }
+
+    /// The legacy objects stay authoritative while both shapes are present.
+    func testClaudeUsageParserPrefersTopLevelWindowsOverLimitsArray() throws {
+        let payload = #"""
+        {
+          "five_hour": {"utilization": 40.0, "resets_at": "2026-09-02T21:30:00+00:00"},
+          "limits": [{"kind": "session", "percent": 17, "resets_at": "2026-09-02T21:30:00+00:00"}]
+        }
+        """#.data(using: .utf8)!
+
+        let snapshot = try ClaudeUsageParser().parse(data: payload)
+        XCTAssertEqual(snapshot.fiveHour?.usedPercent, 40)
+    }
+
+    func testStalenessFormatterBuckets() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertEqual(StalenessFormatter.ageText(since: now.addingTimeInterval(-90), now: now), "1 分钟前")
+        XCTAssertEqual(StalenessFormatter.ageText(since: now.addingTimeInterval(-7_200), now: now), "2 小时前")
+        XCTAssertEqual(StalenessFormatter.ageText(since: now.addingTimeInterval(-172_800), now: now), "2 天前")
+        // A clock that jumped backwards must not render a negative age.
+        XCTAssertEqual(StalenessFormatter.ageText(since: now.addingTimeInterval(60), now: now), "0 分钟前")
+    }
+
+    func testSnapshotCacheRoundTripsAndExpires() throws {
+        let fileURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("claude-usage-test-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let cache = ClaudeSnapshotCache(fileURL: fileURL)
+
+        let capturedAt = Date(timeIntervalSince1970: 1_000_000)
+        let snapshot = ClaudeUsageSnapshot(
+            fiveHour: RateWindow(usedPercent: 17, durationMinutes: nil, resetsAt: capturedAt),
+            sevenDay: RateWindow(usedPercent: 12, durationMinutes: nil, resetsAt: nil),
+            capturedAt: capturedAt
+        )
+        cache.save(snapshot)
+
+        XCTAssertEqual(cache.load(now: capturedAt.addingTimeInterval(3_600)), snapshot)
+        // Beyond the useful age the cache reports nothing rather than week-old percentages.
+        let tooOld = capturedAt.addingTimeInterval(ClaudeSnapshotCache.maximumUsefulAge + 1)
+        XCTAssertNil(cache.load(now: tooOld))
+    }
+
+    func testSnapshotCacheReturnsNilWhenFileMissing() {
+        let fileURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("claude-usage-missing-\(UUID().uuidString).json")
+        XCTAssertNil(ClaudeSnapshotCache(fileURL: fileURL).load())
+    }
+
     func testClaudeUsageParserRejectsUnparseableResponse() {
         let payload = "not json".data(using: .utf8)!
         XCTAssertThrowsError(try ClaudeUsageParser().parse(data: payload))
