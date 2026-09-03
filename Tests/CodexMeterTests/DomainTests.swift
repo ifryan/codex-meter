@@ -248,6 +248,48 @@ final class DomainTests: XCTestCase {
         XCTAssertNil(ClaudeStatusRefresher.trustedWorkingDirectory(configPath: configURL.path))
     }
 
+    @MainActor
+    func testRefreshingStateReplacesPercentagesPerSide() {
+        XCTAssertEqual(
+            NotchMeterView.accessibilityText(
+                codexPercent: 52, claudePercent: 80, codexRefreshing: true, claudeRefreshing: true),
+            "Codex 正在刷新，Claude 正在刷新"
+        )
+        // The two providers finish independently, so only the one still in flight shows as busy.
+        XCTAssertEqual(
+            NotchMeterView.accessibilityText(
+                codexPercent: 52, claudePercent: 80, codexRefreshing: false, claudeRefreshing: true),
+            "Codex 剩余 52%，Claude 正在刷新"
+        )
+        XCTAssertEqual(
+            NotchMeterView.accessibilityText(
+                codexPercent: 52, claudePercent: 80, codexRefreshing: false, claudeRefreshing: false),
+            "Codex 剩余 52%，Claude 剩余 80%"
+        )
+        // "Refreshing" is more informative than "unavailable" when we're about to find out.
+        XCTAssertEqual(
+            NotchMeterView.accessibilityText(
+                codexPercent: nil, claudePercent: nil, codexRefreshing: true, claudeRefreshing: false),
+            "Codex 正在刷新，Claude 未接入"
+        )
+    }
+
+    @MainActor
+    func testRefreshingViewReturnsToValuesWhenDone() {
+        let view = NotchMeterView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        defer { view.stopRefreshAnimation() }
+
+        view.setCodex(primary: MeterValue(percent: 52, resetText: "3H"), secondary: nil, isRefreshing: true)
+        view.setClaude(fiveHour: MeterValue(percent: 80, resetText: "5H"), sevenDay: nil, isRefreshing: true)
+        XCTAssertEqual(view.accessibilityLabel(), "Codex 正在刷新，Claude 正在刷新")
+        view.layoutSubtreeIfNeeded()
+
+        view.setCodex(primary: MeterValue(percent: 52, resetText: "3H"), secondary: nil, isRefreshing: false)
+        view.setClaude(fiveHour: MeterValue(percent: 80, resetText: "5H"), sevenDay: nil, isRefreshing: false)
+        XCTAssertEqual(view.accessibilityLabel(), "Codex 剩余 52%，Claude 剩余 80%")
+        view.layoutSubtreeIfNeeded()
+    }
+
     func testStalenessFormatterBuckets() {
         let now = Date(timeIntervalSince1970: 1_000_000)
         XCTAssertEqual(StalenessFormatter.ageText(since: now.addingTimeInterval(-90), now: now), "1 分钟前")

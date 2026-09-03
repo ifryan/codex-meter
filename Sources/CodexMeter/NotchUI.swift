@@ -142,6 +142,11 @@ final class NotchMeterView: NSControl {
     private var codexSecondaryValue: MeterValue?
     private var claudePrimaryValue: MeterValue?
     private var claudeSecondaryValue: MeterValue?
+    private var codexRefreshing = false
+    private var claudeRefreshing = false
+    /// Drives the animated ellipsis so a refresh that takes a while doesn't read as a frozen panel.
+    private var refreshTicker: Timer?
+    private var refreshPhase = 0
 
     private var bodyWidth: CGFloat {
         if hasNotch && !isExpanded { return bounds.width }
@@ -196,21 +201,60 @@ final class NotchMeterView: NSControl {
         updateTrackingAreas()
     }
 
-    func setCodex(primary: MeterValue?, secondary: MeterValue?) {
+    /// `isRefreshing` swaps the readout for an animated ellipsis. The values still come through so
+    /// the edge ring holds its previous position instead of collapsing to empty mid-refresh.
+    func setCodex(primary: MeterValue?, secondary: MeterValue?, isRefreshing: Bool = false) {
         codexEdgePercent = Self.tightestPercent(primary, secondary)
         (codexPrimaryValue, codexSecondaryValue) = Self.ordered(primary, secondary)
+        codexRefreshing = isRefreshing
         barsView.percent = codexEdgePercent ?? 0
+        updateRefreshTicker()
         needsLayout = true
         needsDisplay = true
         updateAccessibilityLabel()
     }
 
-    func setClaude(fiveHour: MeterValue?, sevenDay: MeterValue?) {
+    func setClaude(fiveHour: MeterValue?, sevenDay: MeterValue?, isRefreshing: Bool = false) {
         claudeEdgePercent = Self.tightestPercent(fiveHour, sevenDay)
         (claudePrimaryValue, claudeSecondaryValue) = Self.ordered(fiveHour, sevenDay)
+        claudeRefreshing = isRefreshing
+        updateRefreshTicker()
         needsLayout = true
         needsDisplay = true
         updateAccessibilityLabel()
+    }
+
+    /// One shared ticker for both wings, running only while something is actually refreshing.
+    private func updateRefreshTicker() {
+        let isNeeded = codexRefreshing || claudeRefreshing
+        guard isNeeded else {
+            refreshTicker?.invalidate()
+            refreshTicker = nil
+            refreshPhase = 0
+            return
+        }
+        guard refreshTicker == nil else { return }
+        refreshPhase = 0
+        let timer = Timer(timeInterval: 0.45, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.refreshPhase = (self.refreshPhase + 1) % 3
+                self.needsLayout = true
+            }
+        }
+        // .common so the animation keeps running while a menu is open or the panel is tracking.
+        RunLoop.main.add(timer, forMode: .common)
+        refreshTicker = timer
+    }
+
+    func stopRefreshAnimation() {
+        refreshTicker?.invalidate()
+        refreshTicker = nil
+    }
+
+    /// Cycles `·` → `··` → `···`.
+    private var refreshPlaceholder: String {
+        String(repeating: "·", count: refreshPhase + 1)
     }
 
     /// The ring shows a single arc per side, so when both windows are present it tracks
@@ -263,9 +307,29 @@ final class NotchMeterView: NSControl {
     }
 
     private func updateAccessibilityLabel() {
-        let codexText = codexEdgePercent.map { "Codex 剩余 \($0)%" } ?? "Codex 余量不可用"
-        let claudeText = claudeEdgePercent.map { "Claude 剩余 \($0)%" } ?? "Claude 未接入"
-        setAccessibilityLabel("\(codexText)，\(claudeText)")
+        setAccessibilityLabel(Self.accessibilityText(
+            codexPercent: codexEdgePercent,
+            claudePercent: claudeEdgePercent,
+            codexRefreshing: codexRefreshing,
+            claudeRefreshing: claudeRefreshing
+        ))
+    }
+
+    /// Kept separate from the view's state so the wording can be asserted in tests. A refreshing
+    /// side announces that rather than a percentage, matching what the wing shows.
+    static func accessibilityText(
+        codexPercent: Int?,
+        claudePercent: Int?,
+        codexRefreshing: Bool,
+        claudeRefreshing: Bool
+    ) -> String {
+        let codexText = codexRefreshing
+            ? "Codex 正在刷新"
+            : (codexPercent.map { "Codex 剩余 \($0)%" } ?? "Codex 余量不可用")
+        let claudeText = claudeRefreshing
+            ? "Claude 正在刷新"
+            : (claudePercent.map { "Claude 剩余 \($0)%" } ?? "Claude 未接入")
+        return "\(codexText)，\(claudeText)"
     }
 
     var detailRowCount: Int { detailLeftLabels.count }
@@ -408,7 +472,8 @@ final class NotchMeterView: NSControl {
             x: outerPadding,
             width: labelWidth,
             bandBottom: bandBottom,
-            alignment: .left
+            alignment: .left,
+            isRefreshing: codexRefreshing
         )
         layoutWing(
             primaryLabel: resetLabel,
@@ -418,7 +483,8 @@ final class NotchMeterView: NSControl {
             x: rightX,
             width: labelWidth,
             bandBottom: bandBottom,
-            alignment: .right
+            alignment: .right,
+            isRefreshing: claudeRefreshing
         )
     }
 
@@ -430,10 +496,24 @@ final class NotchMeterView: NSControl {
         x: CGFloat,
         width: CGFloat,
         bandBottom: CGFloat,
-        alignment: NSTextAlignment
+        alignment: NSTextAlignment,
+        isRefreshing: Bool
     ) {
         primaryLabel.alignment = alignment
         secondaryLabel.alignment = alignment
+
+        if isRefreshing {
+            let height: CGFloat = 15
+            primaryLabel.stringValue = refreshPlaceholder
+            primaryLabel.frame = NSRect(
+                x: x,
+                y: bandBottom + (notchHeight - height) / 2,
+                width: width,
+                height: height
+            )
+            secondaryLabel.isHidden = true
+            return
+        }
 
         guard let primary else {
             let height: CGFloat = 15
@@ -721,13 +801,19 @@ final class NotchPanelController {
         }
     }
 
-    func setCodex(primary: MeterValue?, secondary: MeterValue?) { meterView.setCodex(primary: primary, secondary: secondary) }
-    func setClaude(fiveHour: MeterValue?, sevenDay: MeterValue?) { meterView.setClaude(fiveHour: fiveHour, sevenDay: sevenDay) }
+    func setCodex(primary: MeterValue?, secondary: MeterValue?, isRefreshing: Bool = false) {
+        meterView.setCodex(primary: primary, secondary: secondary, isRefreshing: isRefreshing)
+    }
+
+    func setClaude(fiveHour: MeterValue?, sevenDay: MeterValue?, isRefreshing: Bool = false) {
+        meterView.setClaude(fiveHour: fiveHour, sevenDay: sevenDay, isRefreshing: isRefreshing)
+    }
 
     func invalidate() {
         pendingCollapse?.cancel()
         hoverPollTimer?.invalidate()
         hoverPollTimer = nil
+        meterView.stopRefreshAnimation()
     }
 
     func setDetailRows(_ rows: [MeterDetailRow]) {

@@ -33,12 +33,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private enum ClaudeLoadState {
         case idle
+        case loading(previous: ClaudeUsageSnapshot?)
         case loaded(ClaudeUsageSnapshot)
         case failed(error: Error, previous: ClaudeUsageSnapshot?)
 
         var snapshot: ClaudeUsageSnapshot? {
             switch self {
             case .idle: return nil
+            case .loading(let previous): return previous
             case .loaded(let snapshot): return snapshot
             case .failed(_, let previous): return previous
             }
@@ -47,6 +49,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var error: Error? {
             if case .failed(let error, _) = self { return error }
             return nil
+        }
+
+        var isLoading: Bool {
+            if case .loading = self { return true }
+            return false
         }
     }
 
@@ -122,10 +129,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let previousCodex = state.snapshot
         let previousClaude = claudeState.snapshot
         state = .loading(previous: previousCodex)
+        claudeState = .loading(previous: previousClaude)
         render()
 
         refreshTask = Task { [weak self] in
             guard let self else { return }
+            // Each side re-renders as soon as its own fetch lands, so a slow provider doesn't hold
+            // the other one in the refreshing state.
             async let codex: Void = self.fetchCodex(previous: previousCodex)
             async let claude: Void = self.fetchClaude(previous: previousClaude)
             _ = await (codex, claude)
@@ -151,10 +161,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             state = .loaded(snapshot)
             logger.info("Fetched Codex usage successfully")
         } catch is CancellationError {
+            // Restore rather than staying in `.loading`, which would spin forever and block
+            // the next refresh.
+            state = previous.map { .loaded($0) } ?? .idle
         } catch {
             state = .failed(error: error, previous: previous)
             logger.error("Failed to fetch Codex usage: \(error.localizedDescription, privacy: .private)")
         }
+        render()
     }
 
     private func fetchClaude(previous: ClaudeUsageSnapshot?) async {
@@ -179,10 +193,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             claudeSnapshotCache.save(snapshot)
             logger.info("Fetched Claude usage successfully")
         } catch is CancellationError {
+            claudeState = previous.map { .loaded($0) } ?? .idle
         } catch {
             claudeState = .failed(error: error, previous: previous)
             logger.error("Failed to fetch Claude usage: \(error.localizedDescription, privacy: .private)")
         }
+        render()
     }
 
     private func render(now: Date = Date()) {
@@ -191,11 +207,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let bucket = state.snapshot?.main
         notchPanel.setCodex(
             primary: meterValue(bucket?.primary, now: now),
-            secondary: meterValue(bucket?.secondary, now: now)
+            secondary: meterValue(bucket?.secondary, now: now),
+            isRefreshing: state.isLoading
         )
         notchPanel.setClaude(
             fiveHour: meterValue(claudeState.snapshot?.fiveHour, now: now),
-            sevenDay: meterValue(claudeState.snapshot?.sevenDay, now: now)
+            sevenDay: meterValue(claudeState.snapshot?.sevenDay, now: now),
+            isRefreshing: claudeState.isLoading
         )
 
         notchPanel.setDetailRows(detailRows(now: now))
@@ -207,10 +225,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return MeterValue(percent: window.remainingPercent, resetText: resetText)
     }
 
+    /// True while either provider is still in flight, so the menu doesn't offer a refresh that
+    /// `refresh()` would immediately drop on the floor.
+    private var isRefreshing: Bool { state.isLoading || claudeState.isLoading }
+
     private func detailRows(now: Date) -> [MeterDetailRow] {
         var rows: [MeterDetailRow] = []
 
-        if let snapshot = state.snapshot {
+        if state.isLoading {
+            rows.append(MeterDetailRow(title: "Codex", value: "正在刷新…"))
+        } else if let snapshot = state.snapshot {
             // Only the account-level `main` bucket is shown — `snapshot.buckets` also carries
             // per-model sub-limits (e.g. a specific model's 5-hour burst cap) that aren't part of
             // the plan's actual quota and were confusing users into thinking their plan had a
@@ -221,7 +245,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rows.append(MeterDetailRow(title: "暂无可用重置卡", value: "--"))
         }
 
-        if let claudeSnapshot = claudeState.snapshot {
+        if claudeState.isLoading {
+            rows.append(MeterDetailRow(title: "Claude", value: "正在刷新…"))
+        } else if let claudeSnapshot = claudeState.snapshot {
             if let fiveHour = claudeSnapshot.fiveHour {
                 rows.append(DetailRowBuilder.windowRow(title: "Claude 5H", window: fiveHour, now: now))
             }
@@ -260,7 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(heading)
         menu.addItem(.separator())
 
-        if state.isLoading {
+        if isRefreshing {
             addDisabled("正在刷新…", to: menu)
         }
         if let error = state.error {
@@ -282,9 +308,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         menu.addItem(.separator())
-        let refreshItem = NSMenuItem(title: state.isLoading ? "正在刷新…" : "立即刷新", action: #selector(refreshFromMenu), keyEquivalent: "r")
+        let refreshItem = NSMenuItem(title: isRefreshing ? "正在刷新…" : "立即刷新", action: #selector(refreshFromMenu), keyEquivalent: "r")
         refreshItem.target = self
-        refreshItem.isEnabled = !state.isLoading
+        refreshItem.isEnabled = !isRefreshing
         menu.addItem(refreshItem)
 
         let openItem = NSMenuItem(title: "打开 Codex", action: #selector(openCodex), keyEquivalent: "o")
