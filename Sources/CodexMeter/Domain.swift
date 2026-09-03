@@ -14,6 +14,40 @@ struct RateBucket: Equatable, Sendable {
     let name: String?
     let primary: RateWindow?
     let secondary: RateWindow?
+    /// The account's credit reserve, when the plan exposes one. Distinct from `resetCredits`,
+    /// which are the one-shot reset cards.
+    let credits: CreditBalance?
+
+    /// The account-level bucket Codex reports under the bare `codex` id; everything else is a
+    /// model-scoped sub-limit such as Spark.
+    var isAccountLevel: Bool { id == "codex" }
+
+    /// "GPT-5.3-Codex-Spark" is too wide for the panel; the model family is the part that
+    /// identifies the row.
+    var shortName: String {
+        guard let name, !name.isEmpty else { return id }
+        if let spark = name.range(of: "Spark", options: .caseInsensitive) {
+            let prefix = name[name.startIndex..<spark.lowerBound]
+            let version = prefix.split(whereSeparator: { !"0123456789.".contains($0) }).last
+            return version.map { "Spark \($0)" } ?? "Spark"
+        }
+        return name
+    }
+}
+
+struct CreditBalance: Equatable, Sendable {
+    let hasCredits: Bool
+    let unlimited: Bool
+    let balance: String?
+
+    /// Nothing to show for an account that simply has no credit reserve.
+    var isPresent: Bool { hasCredits || unlimited }
+
+    var displayText: String {
+        if unlimited { return "无限" }
+        guard let balance, !balance.isEmpty else { return "--" }
+        return balance
+    }
 }
 
 struct ResetCredit: Equatable, Sendable {
@@ -268,13 +302,15 @@ private struct RateLimitSnapshotDTO: Decodable {
     let planType: String?
     let primary: RateLimitWindowDTO?
     let secondary: RateLimitWindowDTO?
+    let credits: CreditBalanceDTO?
 
     func bucket(fallbackID: String) -> RateBucket {
         RateBucket(
             id: limitId ?? fallbackID,
             name: limitName,
             primary: primary?.window,
-            secondary: secondary?.window
+            secondary: secondary?.window,
+            credits: credits?.balanceValue
         )
     }
 }
@@ -290,6 +326,17 @@ private struct RateLimitWindowDTO: Decodable {
             durationMinutes: windowDurationMins,
             resetsAt: resetsAt.map { Date(timeIntervalSince1970: TimeInterval($0)) }
         )
+    }
+}
+
+private struct CreditBalanceDTO: Decodable {
+    let hasCredits: Bool?
+    let unlimited: Bool?
+    /// Reported as a string ("0"), not a number.
+    let balance: String?
+
+    var balanceValue: CreditBalance {
+        CreditBalance(hasCredits: hasCredits ?? false, unlimited: unlimited ?? false, balance: balance)
     }
 }
 

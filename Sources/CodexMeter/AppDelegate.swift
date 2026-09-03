@@ -240,7 +240,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // the plan's actual quota and were confusing users into thinking their plan had a
             // 5-hour window it doesn't.
             rows.append(contentsOf: codexRows(title: "Codex", bucket: snapshot.main, now: now))
+            if let reserve = snapshot.main.credits, reserve.isPresent {
+                rows.append(MeterDetailRow(title: "Codex 储备", value: reserve.displayText))
+            }
             rows.append(DetailRowBuilder.codexResetCreditRow(for: snapshot, now: now))
+            // Model-scoped sub-limits (e.g. GPT-5.3-Codex-Spark) sit alongside the account quota
+            // rather than inside it, so they get their own rows below the main ones.
+            for bucket in snapshot.buckets where !bucket.isAccountLevel {
+                rows.append(contentsOf: codexRows(title: bucket.shortName, bucket: bucket, now: now))
+            }
         } else {
             rows.append(MeterDetailRow(title: "暂无可用重置卡", value: "--"))
         }
@@ -401,9 +409,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     durationMinutes: 10_080,
                     resetsAt: now.addingTimeInterval(3 * 3_600)
                 ),
-                secondary: nil
+                secondary: nil,
+                credits: CreditBalance(hasCredits: true, unlimited: false, balance: "120")
             ),
-            buckets: [],
+            buckets: [
+                RateBucket(
+                    id: "codex_bengalfox",
+                    name: "GPT-5.3-Codex-Spark",
+                    primary: RateWindow(
+                        usedPercent: 12,
+                        durationMinutes: 300,
+                        resetsAt: now.addingTimeInterval(2 * 3_600)
+                    ),
+                    secondary: RateWindow(
+                        usedPercent: 4,
+                        durationMinutes: 10_080,
+                        resetsAt: now.addingTimeInterval(5 * 86_400)
+                    ),
+                    credits: nil
+                )
+            ],
             resetCreditCount: 3,
             resetCredits: [7, 14, 28].map {
                 ResetCredit(expiresAt: now.addingTimeInterval(TimeInterval($0 * 86_400)))

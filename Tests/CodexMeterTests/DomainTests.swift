@@ -290,6 +290,66 @@ final class DomainTests: XCTestCase {
         view.layoutSubtreeIfNeeded()
     }
 
+    /// Captured from a live `account/rateLimits/read`: the Spark sub-limit arrives beside the
+    /// account bucket in `rateLimitsByLimitId`, with its own 5-hour and weekly windows.
+    func testParsesSparkSubLimitAndCreditReserve() throws {
+        let payload = #"""
+        {
+          "rateLimits": {
+            "limitId": "codex", "limitName": null, "planType": "pro",
+            "primary": {"usedPercent": 8, "windowDurationMins": 10080, "resetsAt": 1789005363},
+            "secondary": null,
+            "credits": {"hasCredits": true, "unlimited": false, "balance": "120"}
+          },
+          "rateLimitsByLimitId": {
+            "codex_bengalfox": {
+              "limitId": "codex_bengalfox", "limitName": "GPT-5.3-Codex-Spark", "planType": "pro",
+              "primary": {"usedPercent": 12, "windowDurationMins": 300, "resetsAt": 1788432621},
+              "secondary": {"usedPercent": 4, "windowDurationMins": 10080, "resetsAt": 1789019421}
+            },
+            "codex": {
+              "limitId": "codex", "limitName": null, "planType": "pro",
+              "primary": {"usedPercent": 8, "windowDurationMins": 10080, "resetsAt": 1789005363}
+            }
+          },
+          "rateLimitResetCredits": {"availableCount": 0, "credits": []}
+        }
+        """#.data(using: .utf8)!
+
+        let snapshot = try CodexUsageParser().parse(resultData: payload)
+        let spark = try XCTUnwrap(snapshot.buckets.first { !$0.isAccountLevel })
+        XCTAssertEqual(spark.id, "codex_bengalfox")
+        XCTAssertEqual(spark.shortName, "Spark 5.3")
+        XCTAssertEqual(spark.primary?.usedPercent, 12)
+        XCTAssertEqual(spark.primary?.durationMinutes, 300)
+        XCTAssertEqual(spark.secondary?.durationMinutes, 10_080)
+        // The account bucket must stay identifiable so it isn't rendered twice.
+        XCTAssertTrue(snapshot.buckets.contains { $0.isAccountLevel })
+
+        let reserve = try XCTUnwrap(snapshot.main.credits)
+        XCTAssertTrue(reserve.isPresent)
+        XCTAssertEqual(reserve.displayText, "120")
+    }
+
+    /// An account with no reserve must not render an empty "储备" row.
+    func testCreditReserveIsAbsentWhenAccountHasNone() {
+        let none = CreditBalance(hasCredits: false, unlimited: false, balance: "0")
+        XCTAssertFalse(none.isPresent)
+        XCTAssertTrue(CreditBalance(hasCredits: true, unlimited: false, balance: "5").isPresent)
+        XCTAssertEqual(CreditBalance(hasCredits: false, unlimited: true, balance: nil).displayText, "无限")
+        XCTAssertEqual(CreditBalance(hasCredits: true, unlimited: false, balance: nil).displayText, "--")
+    }
+
+    func testBucketShortNameFallsBackToIdAndPassesThroughOtherNames() {
+        XCTAssertEqual(bucket(id: "codex_x", name: nil).shortName, "codex_x")
+        XCTAssertEqual(bucket(id: "codex_x", name: "GPT-6-Codex-Spark").shortName, "Spark 6")
+        XCTAssertEqual(bucket(id: "codex_x", name: "Some Other Limit").shortName, "Some Other Limit")
+    }
+
+    private func bucket(id: String, name: String?) -> RateBucket {
+        RateBucket(id: id, name: name, primary: nil, secondary: nil, credits: nil)
+    }
+
     func testStalenessFormatterBuckets() {
         let now = Date(timeIntervalSince1970: 1_000_000)
         XCTAssertEqual(StalenessFormatter.ageText(since: now.addingTimeInterval(-90), now: now), "1 分钟前")
