@@ -29,7 +29,7 @@ struct UsageSnapshot: Equatable, Sendable {
     let fetchedAt: Date
 }
 
-/// Claude Code 的订阅额度，来自 `ClaudeUsageClient` 对私有 usage 接口的直接请求。
+/// Claude Code 的订阅额度，来自 `ClaudeUsageClient` 读取的 unified 限额响应头。
 struct ClaudeUsageSnapshot: Equatable, Sendable, Codable {
     let fiveHour: RateWindow?
     let sevenDay: RateWindow?
@@ -151,10 +151,8 @@ enum MeterError: LocalizedError, Sendable {
     case server(String)
     case responseTooLarge
     case invalidResponse
-    case claudeNotLoggedIn
-    case claudeSessionExpired
+    case claudeNotConfigured
     case claudeRequestFailed(String)
-    case claudeResponseUnparseable
     case claudeTokenRejected
 
     var errorDescription: String? {
@@ -172,16 +170,12 @@ enum MeterError: LocalizedError, Sendable {
             return "Codex 返回的数据超过安全限制。"
         case .invalidResponse:
             return "无法解析 Codex 限额数据。"
-        case .claudeNotLoggedIn:
-            return "未找到 Claude Code 登录信息，请先运行 claude 并完成登录。"
-        case .claudeSessionExpired:
-            return "Claude 会话令牌已过期，正常使用一次 Claude Code 即可触发续期。"
+        case .claudeNotConfigured:
+            return "未配置 Claude 令牌。运行 claude setup-token 后存入钥匙串，详见 README。"
         case .claudeTokenRejected:
-            return "Claude 令牌无效或缺少 user:profile 权限。"
+            return "Claude 令牌已失效，请重新运行 claude setup-token 并更新钥匙串。"
         case .claudeRequestFailed(let detail):
-            return "Claude 额度接口请求失败：\(detail)"
-        case .claudeResponseUnparseable:
-            return "无法解析 Claude 额度数据。"
+            return "Claude 额度查询失败：\(detail)"
         }
     }
 }
@@ -307,35 +301,82 @@ private struct ResetCreditsSummaryDTO: Decodable {
 private struct ResetCreditDTO: Decodable {
     let expiresAt: TimeInterval?
 }
+/// 解析 `POST /v1/messages` 响应里的 `anthropic-ratelimit-unified-*` 头。实测形状：
+///
+/// ```
+/// anthropic-ratelimit-unified-5h-utilization: 0.04
+/// anthropic-ratelimit-unified-5h-reset: 1788418800
+/// anthropic-ratelimit-unified-7d-utilization: 0.13
+/// anthropic-ratelimit-unified-7d-reset: 1788418800
+/// ```
+///
+/// 注意 `utilization` 在这里是 0-1 的小数，和 `/api/oauth/usage` 的 0-100 整数不同。
+/// `reset` 是 Unix 秒级时间戳。任一窗口缺失都返回 nil，交由调用方按失败处理。
+struct ClaudeRateLimitHeaderParser: Sendable {
+    func parse(headers: [AnyHashable: Any], capturedAt: Date = Date()) -> ClaudeUsageSnapshot? {
+        // Header names are case-insensitive, and URLSession does not normalise them, so index once.
+        var normalized: [String: String] = [:]
+        for (key, value) in headers {
+            normalized["\(key)".lowercased()] = "\(value)"
+        }
 
-/// 解析 `GET https://api.anthropic.com/api/oauth/usage` 的响应（即 `claude` CLI 的 `/usage`
-/// 命令读取的同一个私有接口）。这是一个未公开文档化的内部接口，实际抓包确认的形状：
+        let fiveHour = Self.window(prefix: "5h", in: normalized, durationMinutes: 300)
+        let sevenDay = Self.window(prefix: "7d", in: normalized, durationMinutes: 10_080)
+        guard fiveHour != nil || sevenDay != nil else { return nil }
+        return ClaudeUsageSnapshot(fiveHour: fiveHour, sevenDay: sevenDay, capturedAt: capturedAt)
+    }
+
+    private static func window(prefix: String, in headers: [String: String], durationMinutes: Int) -> RateWindow? {
+        guard
+            let rawUtilization = headers["anthropic-ratelimit-unified-\(prefix)-utilization"],
+            let utilization = Double(rawUtilization)
+        else {
+            return nil
+        }
+        // Observed as a 0-1 fraction; tolerate a 0-100 value in case that ever changes.
+        let usedPercent = utilization <= 1 ? utilization * 100 : utilization
+        let resetsAt = headers["anthropic-ratelimit-unified-\(prefix)-reset"]
+            .flatMap(TimeInterval.init)
+            .map(Date.init(timeIntervalSince1970:))
+        return RateWindow(
+            usedPercent: Int(usedPercent.rounded()),
+            durationMinutes: durationMinutes,
+            resetsAt: resetsAt
+        )
+    }
+}
+
+/// 解析 `GET https://api.anthropic.com/api/oauth/usage` 的响应 —— 即 `claude` CLI `/usage` 命令
+/// 读取的同一个私有接口。只有带 `user:profile` 权限的会话令牌能调用它，因此这条路径只在
+/// 回退到 Claude Code 自身登录态时才用得上。实测形状：
 ///
 /// ```json
 /// {"five_hour":{"utilization":24.0,"resets_at":"2026-09-02T06:50:00.427202+00:00",...},
-///  "seven_day":{"utilization":3.0,"resets_at":"2026-09-03T07:00:00.427225+00:00",...}}
+///  "seven_day":{"utilization":3.0,"resets_at":"2026-09-03T07:00:00.427225+00:00",...},
+///  "limits":[{"kind":"session","percent":17,"resets_at":"..."},
+///            {"kind":"weekly_all","percent":12,"resets_at":"..."}]}
 /// ```
 ///
-/// `utilization` 是 0-100 的整数百分比，`resets_at` 是 ISO-8601 字符串（非 Unix 时间戳）。
-/// 用 `JSONSerialization` 而非严格 `Decodable` 解析，接口细微调整时也不至于直接解析失败。
+/// 这里的 `utilization` 是 0-100，与响应头通道的 0-1 小数不同。用 `JSONSerialization` 而非严格
+/// `Decodable`，接口细微调整时也不至于直接解析失败。
 struct ClaudeUsageParser: Sendable {
     func parse(data: Data, capturedAt: Date = Date()) throws -> ClaudeUsageSnapshot {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw MeterError.claudeResponseUnparseable
+            throw MeterError.claudeRequestFailed("响应不是合法 JSON")
         }
-        // The response carries the same two numbers twice: the legacy `five_hour` / `seven_day`
-        // objects and a newer `limits` array keyed by `kind`. Prefer the legacy objects (still
-        // authoritative today) and fall back to the array so a rename of either shape alone
-        // doesn't blank the meter.
+        // 同样两个数字在响应里出现了两次：旧的 five_hour/seven_day 对象，和新的 limits 数组。
+        // 优先用前者（目前仍然权威），后者作为回退，避免任一形状改名就直接空白。
         let limits = json["limits"] as? [[String: Any]] ?? []
         return ClaudeUsageSnapshot(
-            fiveHour: Self.window(json["five_hour"]) ?? Self.window(limits.first { $0["kind"] as? String == "session" }),
-            sevenDay: Self.window(json["seven_day"]) ?? Self.window(limits.first { $0["kind"] as? String == "weekly_all" }),
+            fiveHour: Self.window(json["five_hour"], durationMinutes: 300)
+                ?? Self.window(limits.first { $0["kind"] as? String == "session" }, durationMinutes: 300),
+            sevenDay: Self.window(json["seven_day"], durationMinutes: 10_080)
+                ?? Self.window(limits.first { $0["kind"] as? String == "weekly_all" }, durationMinutes: 10_080),
             capturedAt: capturedAt
         )
     }
 
-    private static func window(_ raw: Any?) -> RateWindow? {
+    private static func window(_ raw: Any?, durationMinutes: Int) -> RateWindow? {
         guard let dict = raw as? [String: Any] else { return nil }
         guard let rawPercent = (dict["utilization"] as? Double)
             ?? (dict["used_percentage"] as? Double)
@@ -346,7 +387,7 @@ struct ClaudeUsageParser: Sendable {
         let resetsAtString = (dict["resets_at"] as? String) ?? (dict["resetsAt"] as? String)
         return RateWindow(
             usedPercent: Int(usedPercent.rounded()),
-            durationMinutes: nil,
+            durationMinutes: durationMinutes,
             resetsAt: resetsAtString.flatMap(Self.parseISO8601)
         )
     }

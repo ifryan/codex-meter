@@ -178,6 +178,76 @@ final class DomainTests: XCTestCase {
         XCTAssertEqual(snapshot.fiveHour?.usedPercent, 40)
     }
 
+    /// The primary channel. Captured from a real `POST /v1/messages` response: `utilization` is a
+    /// 0-1 fraction here, unlike the 0-100 the usage endpoint returns.
+    func testRateLimitHeaderParsing() throws {
+        let headers: [AnyHashable: Any] = [
+            "anthropic-ratelimit-unified-5h-utilization": "0.04",
+            "anthropic-ratelimit-unified-5h-reset": "1788418800",
+            "anthropic-ratelimit-unified-7d-utilization": "0.13",
+            "anthropic-ratelimit-unified-7d-reset": "1788418800",
+            "anthropic-ratelimit-unified-status": "allowed"
+        ]
+        let snapshot = try XCTUnwrap(ClaudeRateLimitHeaderParser().parse(headers: headers))
+        XCTAssertEqual(snapshot.fiveHour?.usedPercent, 4)
+        XCTAssertEqual(snapshot.fiveHour?.remainingPercent, 96)
+        XCTAssertEqual(snapshot.sevenDay?.usedPercent, 13)
+        XCTAssertEqual(snapshot.fiveHour?.resetsAt, Date(timeIntervalSince1970: 1_788_418_800))
+        XCTAssertEqual(snapshot.fiveHour?.durationMinutes, 300)
+        XCTAssertEqual(snapshot.sevenDay?.durationMinutes, 10_080)
+    }
+
+    /// URLSession does not normalise header casing, so lookups must be case-insensitive.
+    func testRateLimitHeaderParsingIsCaseInsensitive() throws {
+        let headers: [AnyHashable: Any] = [
+            "Anthropic-RateLimit-Unified-5h-Utilization": "0.5",
+            "ANTHROPIC-RATELIMIT-UNIFIED-7D-UTILIZATION": "0.25"
+        ]
+        let snapshot = try XCTUnwrap(ClaudeRateLimitHeaderParser().parse(headers: headers))
+        XCTAssertEqual(snapshot.fiveHour?.usedPercent, 50)
+        XCTAssertEqual(snapshot.sevenDay?.usedPercent, 25)
+    }
+
+    /// A response without any unified headers must be reported as a failure, not as 0% used.
+    func testRateLimitHeaderParsingReturnsNilWithoutHeaders() {
+        XCTAssertNil(ClaudeRateLimitHeaderParser().parse(headers: ["content-type": "application/json"]))
+    }
+
+    /// One window alone is still usable; only a total absence is a failure.
+    func testRateLimitHeaderParsingAcceptsPartialWindows() throws {
+        let headers: [AnyHashable: Any] = ["anthropic-ratelimit-unified-7d-utilization": "0.6"]
+        let snapshot = try XCTUnwrap(ClaudeRateLimitHeaderParser().parse(headers: headers))
+        XCTAssertNil(snapshot.fiveHour)
+        XCTAssertEqual(snapshot.sevenDay?.usedPercent, 60)
+        XCTAssertNil(snapshot.sevenDay?.resetsAt)
+    }
+
+    func testTrustedWorkingDirectoryPrefersAnAcceptedProject() throws {
+        let configURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("claude-config-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: configURL) }
+        // Only an accepted, still-existing directory qualifies; NSTemporaryDirectory() always does.
+        let accepted = NSTemporaryDirectory()
+        let config: [String: Any] = ["projects": [
+            accepted: ["hasTrustDialogAccepted": true],
+            "/nonexistent/path": ["hasTrustDialogAccepted": true],
+            "/Users": ["hasTrustDialogAccepted": false]
+        ]]
+        try JSONSerialization.data(withJSONObject: config).write(to: configURL)
+
+        let resolved = ClaudeStatusRefresher.trustedWorkingDirectory(configPath: configURL.path)
+        XCTAssertEqual(resolved?.path, URL(fileURLWithPath: accepted).path)
+    }
+
+    func testTrustedWorkingDirectoryIsNilWhenNothingIsTrusted() throws {
+        let configURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("claude-config-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: configURL) }
+        let config: [String: Any] = ["projects": ["/Users": ["hasTrustDialogAccepted": false]]]
+        try JSONSerialization.data(withJSONObject: config).write(to: configURL)
+        XCTAssertNil(ClaudeStatusRefresher.trustedWorkingDirectory(configPath: configURL.path))
+    }
+
     func testStalenessFormatterBuckets() {
         let now = Date(timeIntervalSince1970: 1_000_000)
         XCTAssertEqual(StalenessFormatter.ageText(since: now.addingTimeInterval(-90), now: now), "1 分钟前")

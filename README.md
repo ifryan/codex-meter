@@ -44,30 +44,54 @@ codex app-server --stdio
 
 ## Claude 额度怎么来的
 
-Claude Code 没有 Codex 那样的本地 JSON-RPC 接口。Codex Meter 复用 `claude` CLI 自己在 macOS 钥匙串里保存的登录态（服务名 `Claude Code-credentials`），直接请求 `claude` CLI 的 `/usage` 命令读取的同一个接口（`GET https://api.anthropic.com/api/oauth/usage`），和 Codex 一样按固定周期自动刷新，不依赖任何 Claude Code 会话正在运行。
+Claude Code 没有 Codex 那样的本地 JSON-RPC 接口，且没有任何本地文件记录额度百分比。Codex Meter 用两条通道读取，主路失败时自动回退。
 
-- 只读：Codex Meter 从不写入这个钥匙串条目，也不会做令牌刷新（避免和 `claude` CLI 自身的令牌轮换互相冲突）；
-- 首次读取钥匙串时，系统会弹出标准的“允许访问”授权提示，需要手动允许一次；
-- 这是一个未公开文档化的私有接口，字段形状可能随 Claude Code 版本变化而调整。
+### 主通道：unified 限额响应头（推荐，需一次性配置）
 
-### 令牌有效期的限制
+Anthropic 的每个**计费成功**的推理响应都会带上限额响应头：
 
-`claude` CLI 的会话令牌只有约 8 小时有效期，且**只在 Claude Code 实际运行时**才会续期。如果你一段时间没用 Claude Code，Codex Meter 就读不到有效令牌，5 小时 / 7 天两个数字会停留在上次的缓存值（面板会标注数据年龄）。正常使用一次 `claude` 即可触发续期并恢复。
+```
+anthropic-ratelimit-unified-5h-utilization: 0.04
+anthropic-ratelimit-unified-5h-reset: 1788418800
+anthropic-ratelimit-unified-7d-utilization: 0.13
+anthropic-ratelimit-unified-7d-reset: 1788418800
+```
 
-`claude setup-token` 生成的长期令牌**不能**用于这个接口：usage 接口要求 `user:profile` 权限，而该命令签发的是仅含推理权限的令牌，请求会返回：
+这正是我们要显示的两个窗口。`claude setup-token` 签发的长期令牌（约 1 年有效）带 `user:inference` 权限，足以走这条路，因此**完全不依赖 Claude Code 是否在运行**。配置一次：
+
+```sh
+claude setup-token          # 按提示授权，复制 sk-ant-oat01-... 令牌
+security add-generic-password -U \
+  -s "CodexMeter Claude Token" -a "claude-usage-token" -w "<粘贴令牌>"
+```
+
+代价是每次刷新会发一个刻意最小化的请求（最便宜的模型、`max_tokens: 1`，约 10 tokens）。报错响应**不带**限额头（已对 403/404 实测确认），所以没有零成本读取的办法。
+
+令牌优先级：环境变量 `CODEX_METER_CLAUDE_TOKEN` → 钥匙串条目 `CodexMeter Claude Token`。
+
+### 回退通道：`/api/oauth/usage` + Claude Code 登录态
+
+主通道失败时，改用 `claude` CLI 自己在钥匙串里的登录态（服务名 `Claude Code-credentials`）请求 `GET https://api.anthropic.com/api/oauth/usage`，即 `/usage` 命令读的同一个接口。数据更全且不消耗额度，但这个会话令牌只有约 8 小时有效期，且**只在 Claude Code 实际运行时**才续期。
+
+若该令牌已过期，Codex Meter 会在伪终端里启动 `claude` 并发送 `/status`，让 CLI **自己**完成刷新并写回钥匙串，然后重新读取 —— 全程只读，绝不自己写这个条目，从而避免与 CLI 的令牌轮换发生写冲突。该动作有 10 分钟冷却，且只在主通道已经失败后才触发。
+
+注意 `claude setup-token` 的长期令牌**不能**用于这个接口，它要求 `user:profile` 权限：
 
 ```
 403 permission_error
 OAuth token does not meet scope requirement user:profile
 ```
 
-令牌解析优先级为：环境变量 `CODEX_METER_CLAUDE_TOKEN` → 钥匙串条目 `CodexMeter Claude Token` → Claude Code 会话令牌，任一层不可用都会自动回退到下一层。前两层供自行获取的、确实带 `user:profile` 权限的令牌使用；没有配置时走第三层，无需任何设置。
-
 ### 取不到数据时的表现
 
-- 每次成功拉取都会把快照缓存到 `~/Library/Application Support/CodexMeter/claude-usage.json`，取不到新数据时继续显示上次的数值，并在明细面板标注“X 小时前”和具体原因，而不是直接空白（超过 7 天的缓存视为无效）；
-- 会话令牌过期时提示正常使用一次 Claude Code 触发续期，下次刷新即可恢复；
-- 令牌因权限不足被拒时单独提示，便于和「过期」区分。
+- 每次成功拉取都会把快照缓存到 `~/Library/Application Support/CodexMeter/claude-usage.json`，两条通道都失败时继续显示上次的数值，并在明细面板标注“X 小时前”和具体原因，而不是直接空白（超过 7 天的缓存视为无效）；
+- 未配置长期令牌、令牌失效等情况分别有独立提示。
+
+### 已知限制
+
+- 这些都是未公开文档化的私有接口与响应头，形状可能随版本变化；
+- 如果你的网络需要代理才能访问 `api.anthropic.com`，请在系统网络设置里配置 —— GUI 应用不会继承 shell 的 `HTTPS_PROXY` 环境变量；
+- 首次读取 Claude Code 钥匙串条目时，系统会弹出标准的“允许访问”授权提示，需要手动允许一次。
 
 完整说明见 [PRIVACY.md](PRIVACY.md)。
 
@@ -142,7 +166,9 @@ CODEX_METER_CODEX_PATH=/absolute/path/to/codex \
 Sources/CodexMeter/
 ├── Domain.swift              数据模型、Codable 协议和格式化
 ├── CodexUsageClient.swift    Codex 子进程与 JSON-RPC transport
-├── ClaudeUsageClient.swift   解析令牌来源并请求 Claude 私有 usage 接口
+├── ClaudeUsageClient.swift   Claude 主/回退两条额度通道
+├── ClaudeCodeSessionStore.swift 只读 Claude Code 钥匙串登录态
+├── ClaudeStatusRefresher.swift  伪终端跑 claude /status 让 CLI 自行续期
 ├── ClaudeSnapshotCache.swift 缓存最近一次成功的 Claude 快照，供降级显示
 ├── NotchUI.swift             刘海绘制、双环路径进度和窗口控制
 ├── AppDelegate.swift         状态机、刷新、菜单和登录项
