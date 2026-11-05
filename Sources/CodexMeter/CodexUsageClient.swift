@@ -59,7 +59,20 @@ struct CodexUsageClient: Sendable {
     }
 
     private func fetchOnce() throws -> UsageSnapshot {
-        let executable = try resolveCodexExecutable()
+        let executables = try resolveCodexExecutables()
+        var lastLaunchError: Error = MeterError.codexNotFound
+        for executable in executables {
+            do {
+                return try fetchOnce(executable: executable)
+            } catch MeterError.launchFailed(let detail) {
+                // A launcher script can be executable even when its target has moved.
+                lastLaunchError = MeterError.launchFailed("\(executable.path): \(detail)")
+            }
+        }
+        throw lastLaunchError
+    }
+
+    private func fetchOnce(executable: URL) throws -> UsageSnapshot {
         let process = Process()
         let input = Pipe()
         let output = Pipe()
@@ -154,24 +167,42 @@ struct CodexUsageClient: Sendable {
         }
 
         let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
-        try write(
-            id: 1,
-            method: "initialize",
-            params: [
-                "clientInfo": ["name": "codex-meter", "version": appVersion],
-                "capabilities": ["experimentalApi": true]
-            ]
-        )
-        _ = try readResponse(id: 1)
+        do {
+            try write(
+                id: 1,
+                method: "initialize",
+                params: [
+                    "clientInfo": ["name": "codex-meter", "version": appVersion],
+                    "capabilities": ["experimentalApi": true]
+                ]
+            )
+        } catch {
+            throw MeterError.launchFailed(error.localizedDescription)
+        }
+        do {
+            _ = try readResponse(id: 1)
+        } catch MeterError.noResponse(let detail) {
+            throw MeterError.launchFailed(detail ?? "Codex 在初始化完成前退出或超时。")
+        }
         try write(method: "initialized")
         try write(id: 2, method: "account/rateLimits/read", params: NSNull())
-        return try parser.parse(resultData: readResponse(id: 2))
+        var snapshot = try parser.parse(resultData: readResponse(id: 2))
+        // Read identity from the same app-server process as the quota; never infer it from another login store.
+        if (try? write(id: 3, method: "account/read", params: ["refreshToken": false])) != nil,
+           let result = try? readResponse(id: 3),
+           let object = try? JSONSerialization.jsonObject(with: result) as? [String: Any],
+           let account = object["account"] as? [String: Any] {
+            snapshot.identity = account["email"] as? String ?? account["id"] as? String
+        }
+        return snapshot
     }
 
-    private func resolveCodexExecutable() throws -> URL {
-        if let executableOverride,
-           FileManager.default.isExecutableFile(atPath: executableOverride.path) {
-            return executableOverride.resolvingSymlinksInPath()
+    private func resolveCodexExecutables() throws -> [URL] {
+        if let executableOverride {
+            guard FileManager.default.isExecutableFile(atPath: executableOverride.path) else {
+                throw MeterError.launchFailed("所选 Codex 可执行文件不存在或不可执行；未回退到其他账户的路径")
+            }
+            return [executableOverride.resolvingSymlinksInPath()]
         }
 
         let environment = ProcessInfo.processInfo.environment
@@ -185,7 +216,9 @@ struct CodexUsageClient: Sendable {
         }
         candidates.append(contentsOf: [
             "\(home)/.local/bin/codex",
+            "/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex",
             "/Applications/Codex.app/Contents/Resources/codex",
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
             "/Applications/ChatGPT.app/Contents/Resources/codex",
             "/opt/homebrew/bin/codex",
             "/usr/local/bin/codex"
@@ -195,11 +228,14 @@ struct CodexUsageClient: Sendable {
         }
 
         var visited = Set<String>()
-        for path in candidates where visited.insert(path).inserted {
-            if FileManager.default.isExecutableFile(atPath: path) {
-                return URL(fileURLWithPath: path).resolvingSymlinksInPath()
-            }
+        var executables: [URL] = []
+        for path in candidates {
+            let executable = URL(fileURLWithPath: path).resolvingSymlinksInPath()
+            guard visited.insert(executable.path).inserted,
+                  FileManager.default.isExecutableFile(atPath: executable.path) else { continue }
+            executables.append(executable)
         }
-        throw MeterError.codexNotFound
+        guard !executables.isEmpty else { throw MeterError.codexNotFound }
+        return executables
     }
 }

@@ -7,6 +7,20 @@ struct RateWindow: Equatable, Sendable, Codable {
     let resetsAt: Date?
 
     var remainingPercent: Int { max(0, min(100, 100 - usedPercent)) }
+
+    /// The compact display consistently prefers the five-hour pool, then the weekly pool.
+    /// Unsupported or unknown periods remain available in the detail panel only.
+    static func displayWindow(_ windows: [RateWindow]) -> RateWindow? {
+        tightest(windows.filter { $0.durationMinutes == 300 })
+            ?? tightest(windows.filter { $0.durationMinutes == 10_080 })
+    }
+
+    static func tightest(_ windows: [RateWindow]) -> RateWindow? {
+        windows.min {
+            if $0.remainingPercent != $1.remainingPercent { return $0.remainingPercent < $1.remainingPercent }
+            return ($0.durationMinutes ?? Int.max) < ($1.durationMinutes ?? Int.max)
+        }
+    }
 }
 
 struct RateBucket: Equatable, Sendable {
@@ -61,6 +75,7 @@ struct UsageSnapshot: Equatable, Sendable {
     let resetCreditCount: Int?
     let resetCredits: [ResetCredit]
     let fetchedAt: Date
+    var identity: String? = nil
 }
 
 /// Claude Code 的订阅额度，来自 `ClaudeUsageClient` 读取的 unified 限额响应头。
@@ -69,11 +84,9 @@ struct ClaudeUsageSnapshot: Equatable, Sendable, Codable {
     let sevenDay: RateWindow?
     let capturedAt: Date
 
-    /// 剩余最少的那个窗口，也就是真正卡住你的那个。收起态右翼显示它。
+    /// 剩余最少的窗口，用于额度分析；常驻展示使用 displayWindow 的周期优先规则。
     var tightest: RateWindow? {
-        [fiveHour, sevenDay]
-            .compactMap { $0 }
-            .min { $0.remainingPercent < $1.remainingPercent }
+        RateWindow.tightest([fiveHour, sevenDay].compactMap { $0 })
     }
 }
 
@@ -82,19 +95,22 @@ enum MeterProvider: Sendable {
     case codex
     case claudeFiveHour
     case claudeSevenDay
+    case glmFiveHour
+    case glmSevenDay
 
     var displayName: String {
         switch self {
         case .codex: return "Codex"
         case .claudeFiveHour, .claudeSevenDay: return "Claude"
+        case .glmFiveHour, .glmSevenDay: return "GLM"
         }
     }
 
     var windowLabel: String {
         switch self {
         case .codex: return "主额度"
-        case .claudeFiveHour: return "5 小时额度"
-        case .claudeSevenDay: return "周额度"
+        case .claudeFiveHour, .glmFiveHour: return "5 小时额度"
+        case .claudeSevenDay, .glmSevenDay: return "周额度"
         }
     }
 
@@ -102,6 +118,7 @@ enum MeterProvider: Sendable {
         switch self {
         case .codex: return "codex-quota"
         case .claudeFiveHour, .claudeSevenDay: return "claude-quota"
+        case .glmFiveHour, .glmSevenDay: return "glm-quota"
         }
     }
 
@@ -110,6 +127,8 @@ enum MeterProvider: Sendable {
         case .codex: return "codex-primary"
         case .claudeFiveHour: return "claude-5h"
         case .claudeSevenDay: return "claude-7d"
+        case .glmFiveHour: return "glm-5h"
+        case .glmSevenDay: return "glm-7d"
         }
     }
 }
@@ -163,9 +182,53 @@ enum QuotaResetDetector {
     }
 }
 
+enum MeterAgent: String, CaseIterable, Sendable {
+    case codex, claude, glm
+
+    var title: String {
+        switch self {
+        case .codex: return "Codex"
+        case .claude: return "Claude"
+        case .glm: return "GLM"
+        }
+    }
+
+    var index: Int { Self.allCases.firstIndex(of: self)! }
+}
+
+enum MeterAgentOrder {
+    static let defaultsKey = "meterAgentOrder"
+
+    /// Keep recognized entries once, then append providers introduced by a newer app version.
+    static func normalized(_ raw: [String]) -> [MeterAgent] {
+        var result: [MeterAgent] = []
+        for agent in raw.compactMap(MeterAgent.init(rawValue:)) + MeterAgent.allCases where !result.contains(agent) {
+            result.append(agent)
+        }
+        return result
+    }
+
+    static func moving(_ agent: MeterAgent, to insertionIndex: Int, in order: [MeterAgent]) -> [MeterAgent] {
+        var result = normalized(order.map(\.rawValue)).filter { $0 != agent }
+        result.insert(agent, at: max(0, min(result.count, insertionIndex)))
+        return result
+    }
+}
+
+struct MeterDetailSection: Equatable, Sendable {
+    let agent: MeterAgent
+    let plan: String?
+    let rows: [MeterDetailRow]
+    var accountID: UUID? = nil
+    var accountTitle: String? = nil
+    var stableID: String { accountID?.uuidString ?? agent.rawValue }
+    var title: String { accountTitle ?? agent.title }
+}
+
 struct MeterDetailRow: Equatable, Sendable {
     let title: String
     let value: String
+    var detail: String? = nil
 }
 
 /// A single window's remaining percent + formatted reset countdown, pre-rendered for display —
@@ -174,8 +237,33 @@ struct MeterDetailRow: Equatable, Sendable {
 struct MeterValue: Equatable, Sendable {
     let percent: Int
     let resetText: String
+    var durationMinutes: Int? = nil
+    var secondaryPercent: Int? = nil
+    var secondaryResetText: String? = nil
 
-    var text: String { "\(percent)% \(resetText)" }
+    static func summary(windows: [RateWindow], now: Date = Date()) -> MeterValue? {
+        guard let primary = RateWindow.displayWindow(windows) else { return nil }
+        let weekly = primary.durationMinutes == 300
+            ? RateWindow.tightest(windows.filter { $0.durationMinutes == 10_080 }) : nil
+        return MeterValue(percent: primary.remainingPercent,
+                          resetText: primary.resetsAt.map { CompactTimeFormatter.text(until: $0, now: now) } ?? "--H",
+                          durationMinutes: primary.durationMinutes,
+                          secondaryPercent: weekly?.remainingPercent,
+                          secondaryResetText: weekly.map { window in
+                              window.resetsAt.map { CompactTimeFormatter.text(until: $0, now: now) } ?? "--H"
+                          })
+    }
+
+    static func tightest(_ values: [MeterValue?]) -> MeterValue? {
+        values.compactMap { $0 }.min {
+            if $0.percent != $1.percent { return $0.percent < $1.percent }
+            return ($0.durationMinutes ?? Int.max) < ($1.durationMinutes ?? Int.max)
+        }
+    }
+
+    var percentText: String { "\(percent)%" + (secondaryPercent.map { "/\($0)%" } ?? "") }
+    var countdownText: String { resetText + (secondaryResetText.map { "/\($0)" } ?? "") }
+    var text: String { "\(percentText) \(countdownText)" }
 }
 
 enum MeterError: LocalizedError, Sendable {
@@ -238,27 +326,80 @@ enum DurationLabelFormatter {
 }
 
 enum DetailRowBuilder {
+    /// Five-hour and weekly windows lead; other known periods follow, unknown periods last.
+    static func windowRank(_ window: RateWindow) -> Int {
+        switch window.durationMinutes {
+        case 300: return 0
+        case 10_080: return 1
+        default: return 2
+        }
+    }
+
+    static func orderedWindows(_ windows: [RateWindow]) -> [RateWindow] {
+        windows.enumerated().sorted {
+            let lhs = windowRank($0.element), rhs = windowRank($1.element)
+            if lhs != rhs { return lhs < rhs }
+            let left = $0.element.durationMinutes ?? Int.max, right = $1.element.durationMinutes ?? Int.max
+            return left == right ? $0.offset < $1.offset : left < right
+        }.map(\.element)
+    }
+
+    static func windowTitle(_ minutes: Int?) -> String {
+        switch minutes {
+        case 300: return "5 小时额度"
+        case 10_080: return "周额度"
+        case nil: return "未知周期额度"
+        default: return "\(DurationLabelFormatter.label(minutes)) 额度"
+        }
+    }
+
     static func codexResetCreditRow(for snapshot: UsageSnapshot, now: Date = Date()) -> MeterDetailRow {
         let reportedCount = max(0, snapshot.resetCreditCount ?? 0)
         let total = min(50, max(reportedCount, snapshot.resetCredits.count))
         guard total > 0 else {
-            return MeterDetailRow(title: "暂无可用重置卡", value: "--")
+            return MeterDetailRow(title: "重置卡", value: "暂无")
         }
 
         let expirations = snapshot.resetCredits.compactMap(\.expiresAt).sorted()
         let expiryText = (0..<total).map { index in
-            guard index < expirations.count else { return "--" }
-            return CompactTimeFormatter.text(until: expirations[index], now: now)
-        }.joined(separator: "/")
-        return MeterDetailRow(title: "重置卡", value: expiryText)
+            guard index < expirations.count else { return "第 \(index + 1) 张到期时间未知" }
+            return "到期 \(DetailTimeFormatter.reset(expirations[index], now: now))"
+        }.joined(separator: "\n")
+        return MeterDetailRow(title: "重置卡", value: "\(total) 张", detail: expiryText)
     }
 
     static func windowRow(title: String, window: RateWindow?, now: Date = Date()) -> MeterDetailRow {
         guard let window else {
             return MeterDetailRow(title: title, value: "暂无额度窗口")
         }
-        let reset = window.resetsAt.map { CompactTimeFormatter.text(until: $0, now: now) } ?? "未知"
-        return MeterDetailRow(title: title, value: "剩余 \(window.remainingPercent)% · \(reset)")
+        return MeterDetailRow(title: title, value: "剩余 \(window.remainingPercent)%",
+                              detail: "重置 \(DetailTimeFormatter.reset(window.resetsAt, now: now))")
+    }
+}
+
+enum DetailTimeFormatter {
+    static func timestamp(_ date: Date, timeZone: TimeZone = .current, seconds: Bool = false) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = seconds ? "MM-dd HH:mm:ss" : "MM-dd HH:mm"
+        return formatter.string(from: date)
+    }
+
+    static func reset(_ date: Date?, now: Date = Date(), timeZone: TimeZone = .current) -> String {
+        guard let date else { return "未知（--H）" }
+        let minutes = Int(ceil(max(0, date.timeIntervalSince(now)) / 60))
+        let remaining: String
+        if minutes == 0 {
+            remaining = "已到时间"
+        } else {
+            var parts: [String] = []
+            if minutes >= 1_440 { parts.append("\(minutes / 1_440)天") }
+            if minutes % 1_440 >= 60 { parts.append("\(minutes % 1_440 / 60)小时") }
+            if minutes % 60 > 0 { parts.append("\(minutes % 60)分") }
+            remaining = "剩余" + parts.joined()
+        }
+        return "\(timestamp(date, timeZone: timeZone))（\(remaining)）"
     }
 }
 

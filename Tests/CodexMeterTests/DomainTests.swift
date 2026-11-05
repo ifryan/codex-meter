@@ -253,24 +253,24 @@ final class DomainTests: XCTestCase {
         XCTAssertEqual(
             NotchMeterView.accessibilityText(
                 codexPercent: 52, claudePercent: 80, codexRefreshing: true, claudeRefreshing: true),
-            "Codex 正在刷新，Claude 正在刷新"
+            "Codex 正在刷新，Claude 正在刷新，GLM 未配置"
         )
         // The two providers finish independently, so only the one still in flight shows as busy.
         XCTAssertEqual(
             NotchMeterView.accessibilityText(
                 codexPercent: 52, claudePercent: 80, codexRefreshing: false, claudeRefreshing: true),
-            "Codex 剩余 52%，Claude 正在刷新"
+            "Codex 剩余 52%，Claude 正在刷新，GLM 未配置"
         )
         XCTAssertEqual(
             NotchMeterView.accessibilityText(
                 codexPercent: 52, claudePercent: 80, codexRefreshing: false, claudeRefreshing: false),
-            "Codex 剩余 52%，Claude 剩余 80%"
+            "Codex 剩余 52%，Claude 剩余 80%，GLM 未配置"
         )
         // "Refreshing" is more informative than "unavailable" when we're about to find out.
         XCTAssertEqual(
             NotchMeterView.accessibilityText(
                 codexPercent: nil, claudePercent: nil, codexRefreshing: true, claudeRefreshing: false),
-            "Codex 正在刷新，Claude 未接入"
+            "Codex 正在刷新，Claude 未接入，GLM 未配置"
         )
     }
 
@@ -279,14 +279,14 @@ final class DomainTests: XCTestCase {
         let view = NotchMeterView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         defer { view.stopRefreshAnimation() }
 
-        view.setCodex(primary: MeterValue(percent: 52, resetText: "3H"), secondary: nil, isRefreshing: true)
-        view.setClaude(fiveHour: MeterValue(percent: 80, resetText: "5H"), sevenDay: nil, isRefreshing: true)
-        XCTAssertEqual(view.accessibilityLabel(), "Codex 正在刷新，Claude 正在刷新")
+        view.setCodex(value: MeterValue(percent: 52, resetText: "3H"), isRefreshing: true)
+        view.setClaude(value: MeterValue(percent: 80, resetText: "5H"), isRefreshing: true)
+        XCTAssertEqual(view.accessibilityLabel(), "Codex 正在刷新，Claude 正在刷新，GLM 未配置")
         view.layoutSubtreeIfNeeded()
 
-        view.setCodex(primary: MeterValue(percent: 52, resetText: "3H"), secondary: nil, isRefreshing: false)
-        view.setClaude(fiveHour: MeterValue(percent: 80, resetText: "5H"), sevenDay: nil, isRefreshing: false)
-        XCTAssertEqual(view.accessibilityLabel(), "Codex 剩余 52%，Claude 剩余 80%")
+        view.setCodex(value: MeterValue(percent: 52, resetText: "3H"), isRefreshing: false)
+        view.setClaude(value: MeterValue(percent: 80, resetText: "5H"), isRefreshing: false)
+        XCTAssertEqual(view.accessibilityLabel(), "Codex 剩余 52%，Claude 剩余 80%，GLM 未配置")
         view.layoutSubtreeIfNeeded()
     }
 
@@ -404,7 +404,8 @@ final class DomainTests: XCTestCase {
         let window = RateWindow(usedPercent: 28, durationMinutes: nil, resetsAt: now.addingTimeInterval(3_600))
         let row = DetailRowBuilder.windowRow(title: "Claude 5H", window: window, now: now)
         XCTAssertEqual(row.title, "Claude 5H")
-        XCTAssertEqual(row.value, "剩余 72% · 1H")
+        XCTAssertEqual(row.value, "剩余 72%")
+        XCTAssertEqual(row.detail, "重置 \(DetailTimeFormatter.reset(window.resetsAt, now: now))")
     }
 
     func testDetailRowBuilderMissingWindow() {

@@ -67,6 +67,8 @@ enum ClaudeStatusRefresher {
     /// to rewrite it.
     @discardableResult
     static func refresh(timeout: TimeInterval = 20, now: Date = Date()) -> Bool {
+        // Starting Claude while the keychain is locked can also request a password.
+        guard ClaudeKeychainReader.isDefaultKeychainUnlocked else { return false }
         lock.lock()
         if let lastAttemptAt, now.timeIntervalSince(lastAttemptAt) < cooldown {
             lock.unlock()

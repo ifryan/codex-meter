@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import CryptoKit
 import Foundation
-import Security
 
 /// Reads — never writes — the OAuth session Claude Code keeps in its own Keychain item.
 ///
@@ -23,15 +22,7 @@ enum ClaudeCodeSessionStore {
     private static let keychainService = "Claude Code-credentials"
 
     private static func rawItem() -> Data? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess else { return nil }
-        return item as? Data
+        ClaudeKeychainReader.read(service: keychainService)
     }
 
     static func read() -> Session? {

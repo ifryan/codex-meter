@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
-import Security
 
 /// Where the Claude bearer token came from. Only affects diagnostics.
 enum ClaudeTokenSource: Equatable, Sendable {
@@ -25,6 +24,8 @@ enum ClaudeCredentialsStore {
 
     static let keychainService = "CodexMeter Claude Token"
     static let keychainAccount = "claude-usage-token"
+    private static let lock = NSLock()
+    private static var cachedKeychainToken: String?
 
     static func read() -> Credentials? {
         if let token = ProcessInfo.processInfo.environment["CODEX_METER_CLAUDE_TOKEN"], !token.isEmpty {
@@ -34,36 +35,30 @@ enum ClaudeCredentialsStore {
     }
 
     static func readKeychainToken() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var item: CFTypeRef?
+        lock.lock()
+        defer { lock.unlock() }
+        if let cachedKeychainToken { return cachedKeychainToken }
+
         guard
-            SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-            let data = item as? Data,
+            let data = ClaudeKeychainReader.read(service: keychainService, account: keychainAccount),
             let token = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
             !token.isEmpty
         else {
             return nil
         }
+        cachedKeychainToken = token
         return token
+    }
+
+    static func invalidate(accessToken: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        if cachedKeychainToken == accessToken { cachedKeychainToken = nil }
     }
 }
 
-/// Reads Claude subscription quota from the `anthropic-ratelimit-unified-*` response headers that
-/// ride along with every billed inference response.
-///
-/// The obvious endpoint, `GET /api/oauth/usage`, is not usable here: it requires the `user:profile`
-/// scope, and `claude setup-token` mints an inference-only token, so it answers 403. The headers
-/// carry the same two windows we display and only need `user:inference`, which that token has.
-///
-/// The cost is one deliberately minimal request per refresh (a single-token reply on the cheapest
-/// model). Error responses carry no rate-limit headers, so there is no way to read them without
-/// billing a request — verified against 404 and 403 responses.
+/// Uses Claude Code's profile-scoped session for non-inference usage reads. An explicitly enabled
+/// fallback can read quota headers from a minimal billed request using an inference-scoped token.
 struct ClaudeUsageClient: Sendable {
     private static let messagesURL = URL(string: "https://api.anthropic.com/v1/messages")!
     private static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
@@ -76,20 +71,17 @@ struct ClaudeUsageClient: Sendable {
         self.session = session
     }
 
-    /// Primary channel first; if it can't produce a snapshot, fall back to Claude Code's own
-    /// session, refreshing it through the CLI when it has lapsed. The primary error is what
-    /// surfaces if everything fails, since that's the one the user can act on.
-    func fetch() async throws -> ClaudeUsageSnapshot {
+    /// A failed free read never enables the billed fallback on its own.
+    func fetch(allowsPaidProbe: Bool = false) async throws -> ClaudeUsageSnapshot {
         do {
-            return try await fetchFromRateLimitHeaders()
+            return try await fetchFromUsageEndpoint()
         } catch {
-            if let snapshot = try? await fetchFromUsageEndpoint() { return snapshot }
+            if allowsPaidProbe { return try await fetchFromRateLimitHeaders() }
             throw error
         }
     }
 
-    /// Fallback: `GET /api/oauth/usage` using Claude Code's own session token. Richer than the
-    /// header channel and costs no quota, but only works while that short-lived token is valid.
+    /// Reads `GET /api/oauth/usage` using Claude Code's own profile-scoped session token.
     private func fetchFromUsageEndpoint() async throws -> ClaudeUsageSnapshot {
         var session = ClaudeCodeSessionStore.read()
         if session == nil || session?.isExpired == true {
@@ -155,6 +147,7 @@ struct ClaudeUsageClient: Sendable {
         }
 
         if http.statusCode == 401 || http.statusCode == 403 {
+            ClaudeCredentialsStore.invalidate(accessToken: credentials.accessToken)
             throw MeterError.claudeTokenRejected
         }
         throw MeterError.claudeRequestFailed("HTTP \(http.statusCode) 且无限额响应头")
