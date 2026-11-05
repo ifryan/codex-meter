@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Added
 
 - Local macOS notifications when consecutive usage snapshots detect a primary quota reset.
+- Source registry and per-account credentials, capabilities, snapshots, refresh scheduling, and revision-scoped cache isolation.
+- Connection management, up to three selected notch readings, dynamic account details, web cookie login, and Copilot device authorization.
+- Built-in subscription, Coding Plan, balance, organization usage, and existing-tool read paths, with explicit authentication and verification limits in `docs/providers.md`.
+- Declarative HTTP/JSON custom queries, editable New API/Sub2API templates, credential-free template export, and connection previews.
+- Opt-in incremental usage scanning, versioned SQLite history, time/group filters, token/cost charts, and optional pricing catalog import.
+- Core regression test sources for mappings, quota semantics, deduplication, account separation, and pricing boundaries; not executed in this implementation session.
+
+### Changed
+
+- The application uses a source/account collection instead of three dedicated AppDelegate client states.
+- Claude uses the non-inference usage path first; billed probes require an explicit per-connection opt-in.
+- Local logs, external exports and organization daily bills are separate statistics datasets; billing uses UTC days and current credential scopes, while currencies and pricing origins remain distinct.
+- Legacy connection migration and expanded privacy/contribution documentation are included. The Universal 2 build and local installation verification passed on 2026-10-27; unit tests, provider account verification and native UI acceptance remain pending.
 
 ## [0.2.0] - 2026-07-22
 

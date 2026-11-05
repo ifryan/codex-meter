@@ -15,8 +15,13 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("QuartzCore"),
+                .linkedFramework("Security"),
                 .linkedFramework("ServiceManagement"),
-                .linkedFramework("UserNotifications")
+                .linkedFramework("UserNotifications"),
+                .linkedFramework("SwiftUI"),
+                .linkedFramework("WebKit"),
+                .linkedFramework("Charts"),
+                .linkedLibrary("sqlite3")
             ]
         ),
         .testTarget(name: "CodexMeterTests", dependencies: ["CodexMeter"])

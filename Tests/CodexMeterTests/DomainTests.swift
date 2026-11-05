@@ -145,6 +145,246 @@ final class DomainTests: XCTestCase {
         XCTAssertNil(snapshot.sevenDay)
     }
 
+    /// The live endpoint reports the same two numbers again under `limits`; that array is the
+    /// fallback if the legacy top-level objects ever disappear.
+    func testClaudeUsageParserFallsBackToLimitsArray() throws {
+        let payload = #"""
+        {
+          "five_hour": null,
+          "seven_day": null,
+          "limits": [
+            {"kind": "session", "percent": 17, "resets_at": "2026-09-02T21:30:00.343519+00:00"},
+            {"kind": "weekly_all", "percent": 12, "resets_at": "2026-09-03T07:00:00.343543+00:00"}
+          ]
+        }
+        """#.data(using: .utf8)!
+
+        let snapshot = try ClaudeUsageParser().parse(data: payload)
+        XCTAssertEqual(snapshot.fiveHour?.usedPercent, 17)
+        XCTAssertEqual(snapshot.sevenDay?.usedPercent, 12)
+        XCTAssertNotNil(snapshot.fiveHour?.resetsAt)
+    }
+
+    /// The legacy objects stay authoritative while both shapes are present.
+    func testClaudeUsageParserPrefersTopLevelWindowsOverLimitsArray() throws {
+        let payload = #"""
+        {
+          "five_hour": {"utilization": 40.0, "resets_at": "2026-09-02T21:30:00+00:00"},
+          "limits": [{"kind": "session", "percent": 17, "resets_at": "2026-09-02T21:30:00+00:00"}]
+        }
+        """#.data(using: .utf8)!
+
+        let snapshot = try ClaudeUsageParser().parse(data: payload)
+        XCTAssertEqual(snapshot.fiveHour?.usedPercent, 40)
+    }
+
+    /// The primary channel. Captured from a real `POST /v1/messages` response: `utilization` is a
+    /// 0-1 fraction here, unlike the 0-100 the usage endpoint returns.
+    func testRateLimitHeaderParsing() throws {
+        let headers: [AnyHashable: Any] = [
+            "anthropic-ratelimit-unified-5h-utilization": "0.04",
+            "anthropic-ratelimit-unified-5h-reset": "1788418800",
+            "anthropic-ratelimit-unified-7d-utilization": "0.13",
+            "anthropic-ratelimit-unified-7d-reset": "1788418800",
+            "anthropic-ratelimit-unified-status": "allowed"
+        ]
+        let snapshot = try XCTUnwrap(ClaudeRateLimitHeaderParser().parse(headers: headers))
+        XCTAssertEqual(snapshot.fiveHour?.usedPercent, 4)
+        XCTAssertEqual(snapshot.fiveHour?.remainingPercent, 96)
+        XCTAssertEqual(snapshot.sevenDay?.usedPercent, 13)
+        XCTAssertEqual(snapshot.fiveHour?.resetsAt, Date(timeIntervalSince1970: 1_788_418_800))
+        XCTAssertEqual(snapshot.fiveHour?.durationMinutes, 300)
+        XCTAssertEqual(snapshot.sevenDay?.durationMinutes, 10_080)
+    }
+
+    /// URLSession does not normalise header casing, so lookups must be case-insensitive.
+    func testRateLimitHeaderParsingIsCaseInsensitive() throws {
+        let headers: [AnyHashable: Any] = [
+            "Anthropic-RateLimit-Unified-5h-Utilization": "0.5",
+            "ANTHROPIC-RATELIMIT-UNIFIED-7D-UTILIZATION": "0.25"
+        ]
+        let snapshot = try XCTUnwrap(ClaudeRateLimitHeaderParser().parse(headers: headers))
+        XCTAssertEqual(snapshot.fiveHour?.usedPercent, 50)
+        XCTAssertEqual(snapshot.sevenDay?.usedPercent, 25)
+    }
+
+    /// A response without any unified headers must be reported as a failure, not as 0% used.
+    func testRateLimitHeaderParsingReturnsNilWithoutHeaders() {
+        XCTAssertNil(ClaudeRateLimitHeaderParser().parse(headers: ["content-type": "application/json"]))
+    }
+
+    /// One window alone is still usable; only a total absence is a failure.
+    func testRateLimitHeaderParsingAcceptsPartialWindows() throws {
+        let headers: [AnyHashable: Any] = ["anthropic-ratelimit-unified-7d-utilization": "0.6"]
+        let snapshot = try XCTUnwrap(ClaudeRateLimitHeaderParser().parse(headers: headers))
+        XCTAssertNil(snapshot.fiveHour)
+        XCTAssertEqual(snapshot.sevenDay?.usedPercent, 60)
+        XCTAssertNil(snapshot.sevenDay?.resetsAt)
+    }
+
+    func testTrustedWorkingDirectoryPrefersAnAcceptedProject() throws {
+        let configURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("claude-config-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: configURL) }
+        // Only an accepted, still-existing directory qualifies; NSTemporaryDirectory() always does.
+        let accepted = NSTemporaryDirectory()
+        let config: [String: Any] = ["projects": [
+            accepted: ["hasTrustDialogAccepted": true],
+            "/nonexistent/path": ["hasTrustDialogAccepted": true],
+            "/Users": ["hasTrustDialogAccepted": false]
+        ]]
+        try JSONSerialization.data(withJSONObject: config).write(to: configURL)
+
+        let resolved = ClaudeStatusRefresher.trustedWorkingDirectory(configPath: configURL.path)
+        XCTAssertEqual(resolved?.path, URL(fileURLWithPath: accepted).path)
+    }
+
+    func testTrustedWorkingDirectoryIsNilWhenNothingIsTrusted() throws {
+        let configURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("claude-config-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: configURL) }
+        let config: [String: Any] = ["projects": ["/Users": ["hasTrustDialogAccepted": false]]]
+        try JSONSerialization.data(withJSONObject: config).write(to: configURL)
+        XCTAssertNil(ClaudeStatusRefresher.trustedWorkingDirectory(configPath: configURL.path))
+    }
+
+    @MainActor
+    func testRefreshingStateReplacesPercentagesPerSide() {
+        XCTAssertEqual(
+            NotchMeterView.accessibilityText(
+                codexPercent: 52, claudePercent: 80, codexRefreshing: true, claudeRefreshing: true),
+            "Codex 正在刷新，Claude 正在刷新，GLM 未配置"
+        )
+        // The two providers finish independently, so only the one still in flight shows as busy.
+        XCTAssertEqual(
+            NotchMeterView.accessibilityText(
+                codexPercent: 52, claudePercent: 80, codexRefreshing: false, claudeRefreshing: true),
+            "Codex 剩余 52%，Claude 正在刷新，GLM 未配置"
+        )
+        XCTAssertEqual(
+            NotchMeterView.accessibilityText(
+                codexPercent: 52, claudePercent: 80, codexRefreshing: false, claudeRefreshing: false),
+            "Codex 剩余 52%，Claude 剩余 80%，GLM 未配置"
+        )
+        // "Refreshing" is more informative than "unavailable" when we're about to find out.
+        XCTAssertEqual(
+            NotchMeterView.accessibilityText(
+                codexPercent: nil, claudePercent: nil, codexRefreshing: true, claudeRefreshing: false),
+            "Codex 正在刷新，Claude 未接入，GLM 未配置"
+        )
+    }
+
+    @MainActor
+    func testRefreshingViewReturnsToValuesWhenDone() {
+        let view = NotchMeterView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        defer { view.stopRefreshAnimation() }
+
+        view.setCodex(value: MeterValue(percent: 52, resetText: "3H"), isRefreshing: true)
+        view.setClaude(value: MeterValue(percent: 80, resetText: "5H"), isRefreshing: true)
+        XCTAssertEqual(view.accessibilityLabel(), "Codex 正在刷新，Claude 正在刷新，GLM 未配置")
+        view.layoutSubtreeIfNeeded()
+
+        view.setCodex(value: MeterValue(percent: 52, resetText: "3H"), isRefreshing: false)
+        view.setClaude(value: MeterValue(percent: 80, resetText: "5H"), isRefreshing: false)
+        XCTAssertEqual(view.accessibilityLabel(), "Codex 剩余 52%，Claude 剩余 80%，GLM 未配置")
+        view.layoutSubtreeIfNeeded()
+    }
+
+    /// Captured from a live `account/rateLimits/read`: the Spark sub-limit arrives beside the
+    /// account bucket in `rateLimitsByLimitId`, with its own 5-hour and weekly windows.
+    func testParsesSparkSubLimitAndCreditReserve() throws {
+        let payload = #"""
+        {
+          "rateLimits": {
+            "limitId": "codex", "limitName": null, "planType": "pro",
+            "primary": {"usedPercent": 8, "windowDurationMins": 10080, "resetsAt": 1789005363},
+            "secondary": null,
+            "credits": {"hasCredits": true, "unlimited": false, "balance": "120"}
+          },
+          "rateLimitsByLimitId": {
+            "codex_bengalfox": {
+              "limitId": "codex_bengalfox", "limitName": "GPT-5.3-Codex-Spark", "planType": "pro",
+              "primary": {"usedPercent": 12, "windowDurationMins": 300, "resetsAt": 1788432621},
+              "secondary": {"usedPercent": 4, "windowDurationMins": 10080, "resetsAt": 1789019421}
+            },
+            "codex": {
+              "limitId": "codex", "limitName": null, "planType": "pro",
+              "primary": {"usedPercent": 8, "windowDurationMins": 10080, "resetsAt": 1789005363}
+            }
+          },
+          "rateLimitResetCredits": {"availableCount": 0, "credits": []}
+        }
+        """#.data(using: .utf8)!
+
+        let snapshot = try CodexUsageParser().parse(resultData: payload)
+        let spark = try XCTUnwrap(snapshot.buckets.first { !$0.isAccountLevel })
+        XCTAssertEqual(spark.id, "codex_bengalfox")
+        XCTAssertEqual(spark.shortName, "Spark 5.3")
+        XCTAssertEqual(spark.primary?.usedPercent, 12)
+        XCTAssertEqual(spark.primary?.durationMinutes, 300)
+        XCTAssertEqual(spark.secondary?.durationMinutes, 10_080)
+        // The account bucket must stay identifiable so it isn't rendered twice.
+        XCTAssertTrue(snapshot.buckets.contains { $0.isAccountLevel })
+
+        let reserve = try XCTUnwrap(snapshot.main.credits)
+        XCTAssertTrue(reserve.isPresent)
+        XCTAssertEqual(reserve.displayText, "120")
+    }
+
+    /// An account with no reserve must not render an empty "储备" row.
+    func testCreditReserveIsAbsentWhenAccountHasNone() {
+        let none = CreditBalance(hasCredits: false, unlimited: false, balance: "0")
+        XCTAssertFalse(none.isPresent)
+        XCTAssertTrue(CreditBalance(hasCredits: true, unlimited: false, balance: "5").isPresent)
+        XCTAssertEqual(CreditBalance(hasCredits: false, unlimited: true, balance: nil).displayText, "无限")
+        XCTAssertEqual(CreditBalance(hasCredits: true, unlimited: false, balance: nil).displayText, "--")
+    }
+
+    func testBucketShortNameFallsBackToIdAndPassesThroughOtherNames() {
+        XCTAssertEqual(bucket(id: "codex_x", name: nil).shortName, "codex_x")
+        XCTAssertEqual(bucket(id: "codex_x", name: "GPT-6-Codex-Spark").shortName, "Spark 6")
+        XCTAssertEqual(bucket(id: "codex_x", name: "Some Other Limit").shortName, "Some Other Limit")
+    }
+
+    private func bucket(id: String, name: String?) -> RateBucket {
+        RateBucket(id: id, name: name, primary: nil, secondary: nil, credits: nil)
+    }
+
+    func testStalenessFormatterBuckets() {
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertEqual(StalenessFormatter.ageText(since: now.addingTimeInterval(-90), now: now), "1 分钟前")
+        XCTAssertEqual(StalenessFormatter.ageText(since: now.addingTimeInterval(-7_200), now: now), "2 小时前")
+        XCTAssertEqual(StalenessFormatter.ageText(since: now.addingTimeInterval(-172_800), now: now), "2 天前")
+        // A clock that jumped backwards must not render a negative age.
+        XCTAssertEqual(StalenessFormatter.ageText(since: now.addingTimeInterval(60), now: now), "0 分钟前")
+    }
+
+    func testSnapshotCacheRoundTripsAndExpires() throws {
+        let fileURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("claude-usage-test-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        let cache = ClaudeSnapshotCache(fileURL: fileURL)
+
+        let capturedAt = Date(timeIntervalSince1970: 1_000_000)
+        let snapshot = ClaudeUsageSnapshot(
+            fiveHour: RateWindow(usedPercent: 17, durationMinutes: nil, resetsAt: capturedAt),
+            sevenDay: RateWindow(usedPercent: 12, durationMinutes: nil, resetsAt: nil),
+            capturedAt: capturedAt
+        )
+        cache.save(snapshot)
+
+        XCTAssertEqual(cache.load(now: capturedAt.addingTimeInterval(3_600)), snapshot)
+        // Beyond the useful age the cache reports nothing rather than week-old percentages.
+        let tooOld = capturedAt.addingTimeInterval(ClaudeSnapshotCache.maximumUsefulAge + 1)
+        XCTAssertNil(cache.load(now: tooOld))
+    }
+
+    func testSnapshotCacheReturnsNilWhenFileMissing() {
+        let fileURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("claude-usage-missing-\(UUID().uuidString).json")
+        XCTAssertNil(ClaudeSnapshotCache(fileURL: fileURL).load())
+    }
+
     func testClaudeUsageParserRejectsUnparseableResponse() {
         let payload = "not json".data(using: .utf8)!
         XCTAssertThrowsError(try ClaudeUsageParser().parse(data: payload))
@@ -164,7 +404,8 @@ final class DomainTests: XCTestCase {
         let window = RateWindow(usedPercent: 28, durationMinutes: nil, resetsAt: now.addingTimeInterval(3_600))
         let row = DetailRowBuilder.windowRow(title: "Claude 5H", window: window, now: now)
         XCTAssertEqual(row.title, "Claude 5H")
-        XCTAssertEqual(row.value, "剩余 72% · 1H")
+        XCTAssertEqual(row.value, "剩余 72%")
+        XCTAssertEqual(row.detail, "重置 \(DetailTimeFormatter.reset(window.resetsAt, now: now))")
     }
 
     func testDetailRowBuilderMissingWindow() {

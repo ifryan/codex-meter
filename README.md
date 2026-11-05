@@ -1,66 +1,56 @@
 # Codex Meter
 
-[English](README.en.md) · [隐私说明](PRIVACY.md) · [安全策略](SECURITY.md)
+[English](README.en.md) · [来源矩阵](docs/providers.md) · [迁移说明](docs/migration.md) · [隐私](PRIVACY.md) · [安全](SECURITY.md)
 
 [![CI](https://github.com/ifryan/codex-meter/actions/workflows/ci.yml/badge.svg)](https://github.com/ifryan/codex-meter/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black.svg)](https://www.apple.com/macos/)
 
-Codex Meter 是一个轻量的原生 macOS 刘海工具，在物理刘海两侧持续展示本机 Codex 与 Claude Code 账户的额度状态。
+原生 macOS AI 用量监控工具：在刘海或顶部胶囊中查看订阅额度、重置时间、API 余额、Token 和费用。
 
-- 左侧：Codex 主额度剩余百分比及重置倒计时
-- 右侧：Claude 5 小时 / 7 天两个窗口中剩余较少的那个，及其重置倒计时
-- 刘海边缘：左右各一条独立的绿、黄、红渐变进度环，分别对应 Codex 与 Claude
-- 鼠标悬停：展开明细面板，逐行列出 Codex 各额度窗口、重置卡、Claude 5 小时与 7 天额度
-- 额度重置：Codex 或 Claude 的任一窗口恢复至接近 100% 时发送系统通知
-- 点击：查看全部额度窗口、更新时间、手动刷新、开机启动和退出选项
+- 来源注册表和独立账户：支持同一来源的多个命名账户／Key、地区变体和各自认证。
+- 最多固定 3 项常驻，选择每项主指标；悬停查看全部已启用连接，拖动标题调整顺序。
+- 百分比、余额、Token 和费用按实际单位显示；只有具备总量的指标才显示进度。
+- 内置覆盖 Codex、Claude、GLM／Z.ai、Kimi、MiniMax、Copilot、Gemini、Cursor 等多类读取路径，具体能力和限制见[来源矩阵](docs/providers.md)。目录条目数不是已验证服务数量。
+- 自定义 HTTP 查询表单和 JSON 字段映射，支持多指标、数组、单位缩放与模板导入导出。
+- 统一连接设置，支持本机登录态、独立 OAuth 文件、API Key、网页 Cookie 和 Copilot 设备授权。
+- 独立统计窗口，提供今天／7 天／30 天的汇总、趋势和工具／账户／模型分组。
+- 本地日志默认不采集，启用后增量读取；未知账户保留“未归属”，未知价格不视为免费。
+- 服务商日账单、本地日志、已有工具导出分开；费用口径与币种分开，组织账单按 UTC 日展示。
+- 各连接独立刷新，默认 5 分钟；失败保留带时间的旧值，限流退避，换凭据隔离旧请求。
+- 后台凭据读取不主动弹授权，密钥保存在本机钥匙串；付费推理探测默认关闭。
 
-> [!IMPORTANT]
-> 这是一个非官方社区项目，与 OpenAI 没有关联或背书。Codex 是 OpenAI 的产品和商标。
+2026-10-27 已完成 Universal 2 构建、签名与安装文件核对，并替换本机已安装应用。单元测试、各来源真实账户核验及原生界面验收尚未执行，详情见[来源矩阵](docs/providers.md)。新界面截图待原生验收后补充。
 
-## 效果预览
+这是非官方社区项目，与服务商没有关联或背书。Codex 等名称和商标属于各自权利人。
 
-| 默认状态 | Hover 展开 |
-| --- | --- |
-| ![Codex Meter 默认状态：刘海左侧显示剩余百分比，右侧显示重置时间](docs/images/codex-meter-collapsed.png) | ![Codex Meter Hover 状态：展开显示重置卡过期时间](docs/images/codex-meter-expanded.png) |
+## 开始使用
 
-## 工作方式
+1. 点击刘海或顶部胶囊，选择“连接设置…”。
+2. 从“添加连接”选择来源，配置当前本机账户、独立凭据或网页登录。
+3. 可主动执行“连接预览”检查当前查询结果，再保存启用；预览不保存配置。
+4. 为需要常驻的连接开启“固定到刘海”，最多 3 项；在编辑器中选择主指标。
+5. 打开“用量统计… → 采集与价格设置”，按需启用日志、设置目录与价格。
 
-Codex Meter 不实现自己的登录系统，也不要求用户向应用粘贴 Token。它会启动本机可用的：
+Codex 当前 CLI 模式仍通过 `codex app-server --stdio` 读取，不要求粘贴 Token。额外 Codex 账户可选择自己的 OAuth 文件。Claude 优先读取 usage API；只有用户开启“允许消耗少量推理额度的探测”后才使用计费响应头。
 
-```text
-codex app-server --stdio
-```
+旧 GLM Key 可以继续读取，也可在连接编辑器中点击“迁移旧 GLM 凭据”后保存至新账户条目。旧条目不会删除。完整过程见[迁移说明](docs/migration.md)，旧手工配置细节保存在[历史认证说明](docs/legacy-authentication.md)。
 
-然后通过本地 JSON-RPC 方法读取当前 Codex 登录态对应的限额数据。因此：
+## 自定义来源与已有工具
 
-- Codex CLI、Codex App 或 ChatGPT App 必须已经登录；
-- 如果账户由 auth.js 或其他工具同步到本机 Codex 登录态，只要 `codex app-server` 能识别，该账户就能正常显示；
-- 应用本身不读取或保存访问令牌；
-- 用量快照只保存在内存中，退出应用后不会保留；
-- 实际网络访问和身份验证由本机 Codex 进程完成。
+普通来源只需填写查询 URL、请求头和字段映射。认证请求头使用 `${token}`、`${cookie}`、`${userID}`；凭据填入安全凭据栏。字段支持 `data.balance`、`items[0].remaining`、数组行、缩放、剩余／已用方向及重置时间。
 
-完整说明见 [PRIVACY.md](PRIVACY.md)。
+支持 New API／One API、Sub2API 起始模板。模板导入默认停用，用户配置认证后启用。不要把密钥填入 URL、普通请求头常量或请求体。没有任意脚本或自建模型代理。
 
-## Claude 额度怎么来的
-
-Claude Code 没有 Codex 那样的本地 JSON-RPC 接口。Codex Meter 复用 `claude` CLI 自己在 macOS 钥匙串里保存的登录态（服务名 `Claude Code-credentials`），直接请求 `claude` CLI 的 `/usage` 命令读取的同一个接口（`GET https://api.anthropic.com/api/oauth/usage`），和 Codex 一样按固定周期自动刷新，不依赖任何 Claude Code 会话正在运行。
-
-- 只读：Codex Meter 从不写入这个钥匙串条目，也不会做令牌刷新（避免和 `claude` CLI 自身的令牌轮换互相冲突）；
-- 首次读取钥匙串时，系统会弹出标准的“允许访问”授权提示，需要手动允许一次；
-- 如果登录令牌已过期，菜单会显示“Claude 登录已过期，请打开 Claude Code 刷新登录状态”——只需正常使用一次 `claude`（命令行或任意客户端）触发它自己的登录刷新，Codex Meter 下一次刷新就能读到新令牌；
-- 这是一个未公开文档化的私有接口，字段形状可能随 Claude Code 版本变化而调整。
-
-完整说明见 [PRIVACY.md](PRIVACY.md)。
+Magpie 连接读取其 quotas／usage API；CC Switch 连接只读用户指定的 CSV／JSON 导出文件，不读取其密钥库。已有工具数据不与本地日志直接相加。具体格式见[贡献指南](docs/provider-development.md)。
 
 ## 系统要求
 
-- macOS 14 或更高版本
-- Apple Silicon 或 Intel Mac
-- Apple Command Line Tools
-- 已安装并登录的 Codex CLI、Codex App 或 ChatGPT App
+- macOS 14 或更高版本，Apple Silicon 或 Intel Mac。
+- 从源码构建需要 Apple Command Line Tools。
+- CLI、本机应用、API Key、Cookie 或管理 Key 按所选来源要求配置，Codex CLI 不是所有来源的前提。
 
-物理刘海屏幕会使用刘海模式；外接无刘海屏幕会退化为顶部中央胶囊。
+物理刘海屏使用刘海模式；其他屏幕退化为顶部中央胶囊。
 
 ## 从源码安装
 
@@ -108,61 +98,31 @@ CODEX_METER_CODEX_PATH=/absolute/path/to/codex \
   "dist/Codex Meter.app/Contents/MacOS/CodexMeter"
 ```
 
-## 数据刷新与错误状态
+## 数据、历史与价格
 
-- 启动后立即读取一次；
-- 每 5 分钟自动刷新；
-- 从睡眠状态恢复后立即刷新；
-- 菜单支持手动刷新；
-- 连续两次成功快照检测到主额度重置时发送本地系统通知，首次启动不会误报；
-- 刷新失败时保留最后一次成功数据，并在菜单中明确标记为旧数据；
-- 没有成功数据时显示 `--%` 和 `--H`，不会把读取失败误画成 0% 额度。
+配置和历史位于 `~/Library/Application Support/CodexMeter/`：
 
-## 项目结构
+- `connections.json`：非敏感连接配置、排列、日志目录、账户绑定和价格。
+- `usage.sqlite`：标准化用量事件、额度快照与增量导入位置，默认保留 90 天。
+- 钥匙串 `CodexMeter Connections`：每个连接 UUID 对应独立的安全凭据；旧专属条目兼容读取。
 
-```text
-Sources/CodexMeter/
-├── Domain.swift              数据模型、Codable 协议和格式化
-├── CodexUsageClient.swift    Codex 子进程与 JSON-RPC transport
-├── ClaudeUsageClient.swift   读取钥匙串登录态并请求 Claude 私有 usage 接口
-├── NotchUI.swift             刘海绘制、双环路径进度和窗口控制
-├── AppDelegate.swift         状态机、刷新、菜单和登录项
-├── QuotaResetNotifier.swift  额度重置系统通知
-└── CodexMeterApp.swift       应用入口
+统计窗口使用本机时区。模型精确匹配，支持手动价格和主动从 models.dev 补充目录价格；无价格或缺少相关缓存价格时保持未知。API 单价估算不代表订阅的实际付款。
 
-Tests/CodexMeterTests/       协议、时间和路径算法测试
-Resources/Fonts/             Ubuntu Mono 及其许可证
-```
+应用只保存用量字段，不保存提示词、回复、代码或完整会话。完整存储和网络边界见[隐私说明](PRIVACY.md)。
 
-应用依赖 Codex 当前仍处于实验阶段的 app-server 接口。升级 Codex 后如果读取失败，请先在菜单中查看错误信息，并在 Issue 中附上 Codex 版本号，但不要提交 Token、Cookie 或完整配置文件。
+## 开发与贡献
 
-## 开发
+来源定义、账户、获取策略和展示数据分层。新增适配器不需要继续修改三家专用 UI 或 AppDelegate 状态。阅读[适配器指南](docs/provider-development.md)和[CONTRIBUTING.md](CONTRIBUTING.md)。
+
+需要验证时可运行：
 
 ```sh
 swift test
 ./build-app.sh
 ```
 
-提交前应至少通过：
-
-```sh
-git diff --check
-sh -n build-app.sh
-swift test
-./build-app.sh
-```
-
-贡献方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
-## 路线图
-
-- 可视化选择 Codex 可执行文件和目标屏幕
-- Codex app-server 版本兼容矩阵
-- Developer ID 签名、公证和自动 Release
-- 更多语言和 VoiceOver 支持
+新核心样例检查在 `Tests/CodexMeterTests/MonitoringTests.swift`。构建、自动检查、真实账户与界面验收需要分别记录；不要在 Issue 中附 Token、Cookie 或完整会话文件。
 
 ## 许可证与致谢
 
-Codex Meter 使用 [GPL-3.0-only](LICENSE) 发布。
-
-界面设计参考了 [Atoll](https://github.com/Ebullioscopic/Atoll) 和 [boring.notch](https://github.com/TheBoredTeam/boring.notch)。项目内置 Ubuntu Mono，字体许可证见 [Resources/Fonts/LICENCE.txt](Resources/Fonts/LICENCE.txt)。更多归属信息见 [NOTICE.md](NOTICE.md)。
+使用 [GPL-3.0-only](LICENSE) 发布。设计参考 Atoll 和 boring.notch；来源架构与接口参考 CodexBar、Magpie、CC Switch 及服务商公开协议。Ubuntu Mono 字体许可和详细归属见 [NOTICE.md](NOTICE.md)。

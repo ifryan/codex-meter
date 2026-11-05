@@ -1,12 +1,26 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
 
-struct RateWindow: Equatable, Sendable {
+struct RateWindow: Equatable, Sendable, Codable {
     let usedPercent: Int
     let durationMinutes: Int?
     let resetsAt: Date?
 
     var remainingPercent: Int { max(0, min(100, 100 - usedPercent)) }
+
+    /// The compact display consistently prefers the five-hour pool, then the weekly pool.
+    /// Unsupported or unknown periods remain available in the detail panel only.
+    static func displayWindow(_ windows: [RateWindow]) -> RateWindow? {
+        tightest(windows.filter { $0.durationMinutes == 300 })
+            ?? tightest(windows.filter { $0.durationMinutes == 10_080 })
+    }
+
+    static func tightest(_ windows: [RateWindow]) -> RateWindow? {
+        windows.min {
+            if $0.remainingPercent != $1.remainingPercent { return $0.remainingPercent < $1.remainingPercent }
+            return ($0.durationMinutes ?? Int.max) < ($1.durationMinutes ?? Int.max)
+        }
+    }
 }
 
 struct RateBucket: Equatable, Sendable {
@@ -14,6 +28,40 @@ struct RateBucket: Equatable, Sendable {
     let name: String?
     let primary: RateWindow?
     let secondary: RateWindow?
+    /// The account's credit reserve, when the plan exposes one. Distinct from `resetCredits`,
+    /// which are the one-shot reset cards.
+    let credits: CreditBalance?
+
+    /// The account-level bucket Codex reports under the bare `codex` id; everything else is a
+    /// model-scoped sub-limit such as Spark.
+    var isAccountLevel: Bool { id == "codex" }
+
+    /// "GPT-5.3-Codex-Spark" is too wide for the panel; the model family is the part that
+    /// identifies the row.
+    var shortName: String {
+        guard let name, !name.isEmpty else { return id }
+        if let spark = name.range(of: "Spark", options: .caseInsensitive) {
+            let prefix = name[name.startIndex..<spark.lowerBound]
+            let version = prefix.split(whereSeparator: { !"0123456789.".contains($0) }).last
+            return version.map { "Spark \($0)" } ?? "Spark"
+        }
+        return name
+    }
+}
+
+struct CreditBalance: Equatable, Sendable {
+    let hasCredits: Bool
+    let unlimited: Bool
+    let balance: String?
+
+    /// Nothing to show for an account that simply has no credit reserve.
+    var isPresent: Bool { hasCredits || unlimited }
+
+    var displayText: String {
+        if unlimited { return "无限" }
+        guard let balance, !balance.isEmpty else { return "--" }
+        return balance
+    }
 }
 
 struct ResetCredit: Equatable, Sendable {
@@ -27,19 +75,18 @@ struct UsageSnapshot: Equatable, Sendable {
     let resetCreditCount: Int?
     let resetCredits: [ResetCredit]
     let fetchedAt: Date
+    var identity: String? = nil
 }
 
-/// Claude Code 的订阅额度，来自 `ClaudeUsageClient` 对私有 usage 接口的直接请求。
-struct ClaudeUsageSnapshot: Equatable, Sendable {
+/// Claude Code 的订阅额度，来自 `ClaudeUsageClient` 读取的 unified 限额响应头。
+struct ClaudeUsageSnapshot: Equatable, Sendable, Codable {
     let fiveHour: RateWindow?
     let sevenDay: RateWindow?
     let capturedAt: Date
 
-    /// 剩余最少的那个窗口，也就是真正卡住你的那个。收起态右翼显示它。
+    /// 剩余最少的窗口，用于额度分析；常驻展示使用 displayWindow 的周期优先规则。
     var tightest: RateWindow? {
-        [fiveHour, sevenDay]
-            .compactMap { $0 }
-            .min { $0.remainingPercent < $1.remainingPercent }
+        RateWindow.tightest([fiveHour, sevenDay].compactMap { $0 })
     }
 }
 
@@ -48,19 +95,22 @@ enum MeterProvider: Sendable {
     case codex
     case claudeFiveHour
     case claudeSevenDay
+    case glmFiveHour
+    case glmSevenDay
 
     var displayName: String {
         switch self {
         case .codex: return "Codex"
         case .claudeFiveHour, .claudeSevenDay: return "Claude"
+        case .glmFiveHour, .glmSevenDay: return "GLM"
         }
     }
 
     var windowLabel: String {
         switch self {
         case .codex: return "主额度"
-        case .claudeFiveHour: return "5 小时额度"
-        case .claudeSevenDay: return "周额度"
+        case .claudeFiveHour, .glmFiveHour: return "5 小时额度"
+        case .claudeSevenDay, .glmSevenDay: return "周额度"
         }
     }
 
@@ -68,6 +118,7 @@ enum MeterProvider: Sendable {
         switch self {
         case .codex: return "codex-quota"
         case .claudeFiveHour, .claudeSevenDay: return "claude-quota"
+        case .glmFiveHour, .glmSevenDay: return "glm-quota"
         }
     }
 
@@ -76,6 +127,8 @@ enum MeterProvider: Sendable {
         case .codex: return "codex-primary"
         case .claudeFiveHour: return "claude-5h"
         case .claudeSevenDay: return "claude-7d"
+        case .glmFiveHour: return "glm-5h"
+        case .glmSevenDay: return "glm-7d"
         }
     }
 }
@@ -129,9 +182,53 @@ enum QuotaResetDetector {
     }
 }
 
+enum MeterAgent: String, CaseIterable, Sendable {
+    case codex, claude, glm
+
+    var title: String {
+        switch self {
+        case .codex: return "Codex"
+        case .claude: return "Claude"
+        case .glm: return "GLM"
+        }
+    }
+
+    var index: Int { Self.allCases.firstIndex(of: self)! }
+}
+
+enum MeterAgentOrder {
+    static let defaultsKey = "meterAgentOrder"
+
+    /// Keep recognized entries once, then append providers introduced by a newer app version.
+    static func normalized(_ raw: [String]) -> [MeterAgent] {
+        var result: [MeterAgent] = []
+        for agent in raw.compactMap(MeterAgent.init(rawValue:)) + MeterAgent.allCases where !result.contains(agent) {
+            result.append(agent)
+        }
+        return result
+    }
+
+    static func moving(_ agent: MeterAgent, to insertionIndex: Int, in order: [MeterAgent]) -> [MeterAgent] {
+        var result = normalized(order.map(\.rawValue)).filter { $0 != agent }
+        result.insert(agent, at: max(0, min(result.count, insertionIndex)))
+        return result
+    }
+}
+
+struct MeterDetailSection: Equatable, Sendable {
+    let agent: MeterAgent
+    let plan: String?
+    let rows: [MeterDetailRow]
+    var accountID: UUID? = nil
+    var accountTitle: String? = nil
+    var stableID: String { accountID?.uuidString ?? agent.rawValue }
+    var title: String { accountTitle ?? agent.title }
+}
+
 struct MeterDetailRow: Equatable, Sendable {
     let title: String
     let value: String
+    var detail: String? = nil
 }
 
 /// A single window's remaining percent + formatted reset countdown, pre-rendered for display —
@@ -140,8 +237,33 @@ struct MeterDetailRow: Equatable, Sendable {
 struct MeterValue: Equatable, Sendable {
     let percent: Int
     let resetText: String
+    var durationMinutes: Int? = nil
+    var secondaryPercent: Int? = nil
+    var secondaryResetText: String? = nil
 
-    var text: String { "\(percent)% \(resetText)" }
+    static func summary(windows: [RateWindow], now: Date = Date()) -> MeterValue? {
+        guard let primary = RateWindow.displayWindow(windows) else { return nil }
+        let weekly = primary.durationMinutes == 300
+            ? RateWindow.tightest(windows.filter { $0.durationMinutes == 10_080 }) : nil
+        return MeterValue(percent: primary.remainingPercent,
+                          resetText: primary.resetsAt.map { CompactTimeFormatter.text(until: $0, now: now) } ?? "--H",
+                          durationMinutes: primary.durationMinutes,
+                          secondaryPercent: weekly?.remainingPercent,
+                          secondaryResetText: weekly.map { window in
+                              window.resetsAt.map { CompactTimeFormatter.text(until: $0, now: now) } ?? "--H"
+                          })
+    }
+
+    static func tightest(_ values: [MeterValue?]) -> MeterValue? {
+        values.compactMap { $0 }.min {
+            if $0.percent != $1.percent { return $0.percent < $1.percent }
+            return ($0.durationMinutes ?? Int.max) < ($1.durationMinutes ?? Int.max)
+        }
+    }
+
+    var percentText: String { "\(percent)%" + (secondaryPercent.map { "/\($0)%" } ?? "") }
+    var countdownText: String { resetText + (secondaryResetText.map { "/\($0)" } ?? "") }
+    var text: String { "\(percentText) \(countdownText)" }
 }
 
 enum MeterError: LocalizedError, Sendable {
@@ -151,10 +273,9 @@ enum MeterError: LocalizedError, Sendable {
     case server(String)
     case responseTooLarge
     case invalidResponse
-    case claudeNotLoggedIn
-    case claudeSessionExpired
+    case claudeNotConfigured
     case claudeRequestFailed(String)
-    case claudeResponseUnparseable
+    case claudeTokenRejected
 
     var errorDescription: String? {
         switch self {
@@ -171,14 +292,12 @@ enum MeterError: LocalizedError, Sendable {
             return "Codex 返回的数据超过安全限制。"
         case .invalidResponse:
             return "无法解析 Codex 限额数据。"
-        case .claudeNotLoggedIn:
-            return "未找到 Claude Code 登录信息，请先运行 claude 并完成登录。"
-        case .claudeSessionExpired:
-            return "Claude 登录已过期，请打开 Claude Code 刷新登录状态。"
+        case .claudeNotConfigured:
+            return "未配置 Claude 令牌。运行 claude setup-token 后存入钥匙串，详见 README。"
+        case .claudeTokenRejected:
+            return "Claude 令牌已失效，请重新运行 claude setup-token 并更新钥匙串。"
         case .claudeRequestFailed(let detail):
-            return "Claude 额度接口请求失败：\(detail)"
-        case .claudeResponseUnparseable:
-            return "无法解析 Claude 额度数据。"
+            return "Claude 额度查询失败：\(detail)"
         }
     }
 }
@@ -207,27 +326,80 @@ enum DurationLabelFormatter {
 }
 
 enum DetailRowBuilder {
+    /// Five-hour and weekly windows lead; other known periods follow, unknown periods last.
+    static func windowRank(_ window: RateWindow) -> Int {
+        switch window.durationMinutes {
+        case 300: return 0
+        case 10_080: return 1
+        default: return 2
+        }
+    }
+
+    static func orderedWindows(_ windows: [RateWindow]) -> [RateWindow] {
+        windows.enumerated().sorted {
+            let lhs = windowRank($0.element), rhs = windowRank($1.element)
+            if lhs != rhs { return lhs < rhs }
+            let left = $0.element.durationMinutes ?? Int.max, right = $1.element.durationMinutes ?? Int.max
+            return left == right ? $0.offset < $1.offset : left < right
+        }.map(\.element)
+    }
+
+    static func windowTitle(_ minutes: Int?) -> String {
+        switch minutes {
+        case 300: return "5 小时额度"
+        case 10_080: return "周额度"
+        case nil: return "未知周期额度"
+        default: return "\(DurationLabelFormatter.label(minutes)) 额度"
+        }
+    }
+
     static func codexResetCreditRow(for snapshot: UsageSnapshot, now: Date = Date()) -> MeterDetailRow {
         let reportedCount = max(0, snapshot.resetCreditCount ?? 0)
         let total = min(50, max(reportedCount, snapshot.resetCredits.count))
         guard total > 0 else {
-            return MeterDetailRow(title: "暂无可用重置卡", value: "--")
+            return MeterDetailRow(title: "重置卡", value: "暂无")
         }
 
         let expirations = snapshot.resetCredits.compactMap(\.expiresAt).sorted()
         let expiryText = (0..<total).map { index in
-            guard index < expirations.count else { return "--" }
-            return CompactTimeFormatter.text(until: expirations[index], now: now)
-        }.joined(separator: "/")
-        return MeterDetailRow(title: "重置卡", value: expiryText)
+            guard index < expirations.count else { return "第 \(index + 1) 张到期时间未知" }
+            return "到期 \(DetailTimeFormatter.reset(expirations[index], now: now))"
+        }.joined(separator: "\n")
+        return MeterDetailRow(title: "重置卡", value: "\(total) 张", detail: expiryText)
     }
 
     static func windowRow(title: String, window: RateWindow?, now: Date = Date()) -> MeterDetailRow {
         guard let window else {
             return MeterDetailRow(title: title, value: "暂无额度窗口")
         }
-        let reset = window.resetsAt.map { CompactTimeFormatter.text(until: $0, now: now) } ?? "未知"
-        return MeterDetailRow(title: title, value: "剩余 \(window.remainingPercent)% · \(reset)")
+        return MeterDetailRow(title: title, value: "剩余 \(window.remainingPercent)%",
+                              detail: "重置 \(DetailTimeFormatter.reset(window.resetsAt, now: now))")
+    }
+}
+
+enum DetailTimeFormatter {
+    static func timestamp(_ date: Date, timeZone: TimeZone = .current, seconds: Bool = false) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = seconds ? "MM-dd HH:mm:ss" : "MM-dd HH:mm"
+        return formatter.string(from: date)
+    }
+
+    static func reset(_ date: Date?, now: Date = Date(), timeZone: TimeZone = .current) -> String {
+        guard let date else { return "未知（--H）" }
+        let minutes = Int(ceil(max(0, date.timeIntervalSince(now)) / 60))
+        let remaining: String
+        if minutes == 0 {
+            remaining = "已到时间"
+        } else {
+            var parts: [String] = []
+            if minutes >= 1_440 { parts.append("\(minutes / 1_440)天") }
+            if minutes % 1_440 >= 60 { parts.append("\(minutes % 1_440 / 60)小时") }
+            if minutes % 60 > 0 { parts.append("\(minutes % 60)分") }
+            remaining = "剩余" + parts.joined()
+        }
+        return "\(timestamp(date, timeZone: timeZone))（\(remaining)）"
     }
 }
 
@@ -271,13 +443,15 @@ private struct RateLimitSnapshotDTO: Decodable {
     let planType: String?
     let primary: RateLimitWindowDTO?
     let secondary: RateLimitWindowDTO?
+    let credits: CreditBalanceDTO?
 
     func bucket(fallbackID: String) -> RateBucket {
         RateBucket(
             id: limitId ?? fallbackID,
             name: limitName,
             primary: primary?.window,
-            secondary: secondary?.window
+            secondary: secondary?.window,
+            credits: credits?.balanceValue
         )
     }
 }
@@ -296,6 +470,17 @@ private struct RateLimitWindowDTO: Decodable {
     }
 }
 
+private struct CreditBalanceDTO: Decodable {
+    let hasCredits: Bool?
+    let unlimited: Bool?
+    /// Reported as a string ("0"), not a number.
+    let balance: String?
+
+    var balanceValue: CreditBalance {
+        CreditBalance(hasCredits: hasCredits ?? false, unlimited: unlimited ?? false, balance: balance)
+    }
+}
+
 private struct ResetCreditsSummaryDTO: Decodable {
     let availableCount: Int
     let credits: [ResetCreditDTO]?
@@ -304,30 +489,82 @@ private struct ResetCreditsSummaryDTO: Decodable {
 private struct ResetCreditDTO: Decodable {
     let expiresAt: TimeInterval?
 }
+/// 解析 `POST /v1/messages` 响应里的 `anthropic-ratelimit-unified-*` 头。实测形状：
+///
+/// ```
+/// anthropic-ratelimit-unified-5h-utilization: 0.04
+/// anthropic-ratelimit-unified-5h-reset: 1788418800
+/// anthropic-ratelimit-unified-7d-utilization: 0.13
+/// anthropic-ratelimit-unified-7d-reset: 1788418800
+/// ```
+///
+/// 注意 `utilization` 在这里是 0-1 的小数，和 `/api/oauth/usage` 的 0-100 整数不同。
+/// `reset` 是 Unix 秒级时间戳。任一窗口缺失都返回 nil，交由调用方按失败处理。
+struct ClaudeRateLimitHeaderParser: Sendable {
+    func parse(headers: [AnyHashable: Any], capturedAt: Date = Date()) -> ClaudeUsageSnapshot? {
+        // Header names are case-insensitive, and URLSession does not normalise them, so index once.
+        var normalized: [String: String] = [:]
+        for (key, value) in headers {
+            normalized["\(key)".lowercased()] = "\(value)"
+        }
 
-/// 解析 `GET https://api.anthropic.com/api/oauth/usage` 的响应（即 `claude` CLI 的 `/usage`
-/// 命令读取的同一个私有接口）。这是一个未公开文档化的内部接口，实际抓包确认的形状：
+        let fiveHour = Self.window(prefix: "5h", in: normalized, durationMinutes: 300)
+        let sevenDay = Self.window(prefix: "7d", in: normalized, durationMinutes: 10_080)
+        guard fiveHour != nil || sevenDay != nil else { return nil }
+        return ClaudeUsageSnapshot(fiveHour: fiveHour, sevenDay: sevenDay, capturedAt: capturedAt)
+    }
+
+    private static func window(prefix: String, in headers: [String: String], durationMinutes: Int) -> RateWindow? {
+        guard
+            let rawUtilization = headers["anthropic-ratelimit-unified-\(prefix)-utilization"],
+            let utilization = Double(rawUtilization)
+        else {
+            return nil
+        }
+        // Observed as a 0-1 fraction; tolerate a 0-100 value in case that ever changes.
+        let usedPercent = utilization <= 1 ? utilization * 100 : utilization
+        let resetsAt = headers["anthropic-ratelimit-unified-\(prefix)-reset"]
+            .flatMap(TimeInterval.init)
+            .map(Date.init(timeIntervalSince1970:))
+        return RateWindow(
+            usedPercent: Int(usedPercent.rounded()),
+            durationMinutes: durationMinutes,
+            resetsAt: resetsAt
+        )
+    }
+}
+
+/// 解析 `GET https://api.anthropic.com/api/oauth/usage` 的响应 —— 即 `claude` CLI `/usage` 命令
+/// 读取的同一个私有接口。只有带 `user:profile` 权限的会话令牌能调用它，因此这条路径只在
+/// 回退到 Claude Code 自身登录态时才用得上。实测形状：
 ///
 /// ```json
 /// {"five_hour":{"utilization":24.0,"resets_at":"2026-09-02T06:50:00.427202+00:00",...},
-///  "seven_day":{"utilization":3.0,"resets_at":"2026-09-03T07:00:00.427225+00:00",...}}
+///  "seven_day":{"utilization":3.0,"resets_at":"2026-09-03T07:00:00.427225+00:00",...},
+///  "limits":[{"kind":"session","percent":17,"resets_at":"..."},
+///            {"kind":"weekly_all","percent":12,"resets_at":"..."}]}
 /// ```
 ///
-/// `utilization` 是 0-100 的整数百分比，`resets_at` 是 ISO-8601 字符串（非 Unix 时间戳）。
-/// 用 `JSONSerialization` 而非严格 `Decodable` 解析，接口细微调整时也不至于直接解析失败。
+/// 这里的 `utilization` 是 0-100，与响应头通道的 0-1 小数不同。用 `JSONSerialization` 而非严格
+/// `Decodable`，接口细微调整时也不至于直接解析失败。
 struct ClaudeUsageParser: Sendable {
     func parse(data: Data, capturedAt: Date = Date()) throws -> ClaudeUsageSnapshot {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw MeterError.claudeResponseUnparseable
+            throw MeterError.claudeRequestFailed("响应不是合法 JSON")
         }
+        // 同样两个数字在响应里出现了两次：旧的 five_hour/seven_day 对象，和新的 limits 数组。
+        // 优先用前者（目前仍然权威），后者作为回退，避免任一形状改名就直接空白。
+        let limits = json["limits"] as? [[String: Any]] ?? []
         return ClaudeUsageSnapshot(
-            fiveHour: Self.window(json["five_hour"]),
-            sevenDay: Self.window(json["seven_day"]),
+            fiveHour: Self.window(json["five_hour"], durationMinutes: 300)
+                ?? Self.window(limits.first { $0["kind"] as? String == "session" }, durationMinutes: 300),
+            sevenDay: Self.window(json["seven_day"], durationMinutes: 10_080)
+                ?? Self.window(limits.first { $0["kind"] as? String == "weekly_all" }, durationMinutes: 10_080),
             capturedAt: capturedAt
         )
     }
 
-    private static func window(_ raw: Any?) -> RateWindow? {
+    private static func window(_ raw: Any?, durationMinutes: Int) -> RateWindow? {
         guard let dict = raw as? [String: Any] else { return nil }
         guard let rawPercent = (dict["utilization"] as? Double)
             ?? (dict["used_percentage"] as? Double)
@@ -338,7 +575,7 @@ struct ClaudeUsageParser: Sendable {
         let resetsAtString = (dict["resets_at"] as? String) ?? (dict["resetsAt"] as? String)
         return RateWindow(
             usedPercent: Int(usedPercent.rounded()),
-            durationMinutes: nil,
+            durationMinutes: durationMinutes,
             resetsAt: resetsAtString.flatMap(Self.parseISO8601)
         )
     }

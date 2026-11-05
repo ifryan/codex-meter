@@ -94,561 +94,395 @@ enum EdgePathTrimmer {
     }
 }
 
-@MainActor
-final class UsageBarsView: NSView {
-    var percent = 0 { didSet { needsDisplay = true } }
+/// The same three row centers align text on the left with progress on the right.
+enum MeterLayout {
+    static let leftWing: CGFloat = 104
+    static let rightWing: CGFloat = 64
+    static let capsuleWidth: CGFloat = 320
+    static let compactPadding: CGFloat = 2
+    static let compactHorizontalPadding: CGFloat = 8
+    static let detailPadding: CGFloat = 12
+    static let sectionGap: CGFloat = 10
+    static let footerHeight: CGFloat = 14
+    static let footerGap: CGFloat = 10
+    static var detailChromeHeight: CGFloat { detailPadding * 2 + footerGap + footerHeight }
 
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        let heights: [CGFloat] = [7, 12, 18, 12, 7]
-        let activeCount = percent <= 0 ? 0 : min(5, Int(ceil(Double(percent) / 20.0)))
-        for index in 0..<5 {
-            let height = heights[index]
-            let rect = NSRect(x: CGFloat(index) * 7, y: (bounds.height - height) / 2, width: 3, height: height)
-            (index < activeCount ? NSColor.white : NSColor.white.withAlphaComponent(0.28)).setFill()
-            NSBezierPath(roundedRect: rect, xRadius: 1.5, yRadius: 1.5).fill()
+    static func headerHeight(notchHeight: CGFloat) -> CGFloat {
+        notchHeight > 0 ? floor(notchHeight) : 32
+    }
+
+    static func wingRects(width: CGFloat, top: CGFloat, height: CGFloat, notch: NSRange?) -> [NSRect] {
+        let left = notch.map { CGFloat($0.location) } ?? width * leftWing / (leftWing + rightWing)
+        let right = notch.map { CGFloat($0.location + $0.length) } ?? left
+        return [NSRect(x: 0, y: top - height, width: left, height: height),
+                NSRect(x: right, y: top - height, width: max(0, width - right), height: height)]
+    }
+
+    static func rows(in wing: NSRect, count: Int = 3) -> [NSRect] {
+        guard count > 0 else { return [] }
+        let rowHeight = max(0, (wing.height - compactPadding * 2) / CGFloat(count))
+        let top = wing.midY + rowHeight * CGFloat(count) / 2
+        return (0..<count).map {
+            NSRect(x: wing.minX + compactHorizontalPadding, y: top - CGFloat($0 + 1) * rowHeight, width: max(0, wing.width - compactHorizontalPadding * 2), height: rowHeight)
         }
     }
+
+    static func progressTracks(in row: NSRect, paired: Bool) -> [NSRect] {
+        if paired {
+            let width = max(0, (row.width - 4) / 2)
+            return [NSRect(x: row.minX, y: row.midY - 1.5, width: width, height: 3),
+                    NSRect(x: row.maxX - width, y: row.midY - 1.5, width: width, height: 3)]
+        }
+        return [NSRect(x: row.minX, y: row.midY - 1.5, width: row.width, height: 3)]
+    }
+
 }
 
 @MainActor
 final class NotchMeterView: NSControl {
     var menuProvider: (() -> NSMenu)?
     var hoverChanged: ((Bool) -> Void)?
-
-    private let iconView = NSImageView()
-    /// Collapsed notch: Codex's top line (e.g. "52% 3D"). Expanded: Codex's big headline value.
-    private let valueLabel = NSTextField(labelWithString: "--%")
-    /// Collapsed notch: Codex's second line, only shown when the account has a second window
-    /// (e.g. a 5-hour window alongside the weekly one). Hidden in expanded mode.
-    private let codexSecondaryLabel = NSTextField(labelWithString: "")
-    /// Collapsed notch: Claude's top line. Expanded: Claude's big headline value.
-    private let resetLabel = NSTextField(labelWithString: "--H")
-    /// Collapsed notch: Claude's second line (7-day), shown alongside `resetLabel`'s 5-hour line.
-    private let claudeSecondaryLabel = NSTextField(labelWithString: "")
-    private let headingLabel = NSTextField(labelWithString: "Codex")
-    private let captionLabel = NSTextField(labelWithString: "剩余")
-    private let barsView = UsageBarsView()
-    private var detailLeftLabels: [NSTextField] = []
-    private var detailRightLabels: [NSTextField] = []
+    var orderChanged: (([MeterAgent]) -> Void)?
+    var dragStateChanged: ((Bool) -> Void)?
+    private var agentOrder = MeterAgent.allCases
+    private(set) var isDragging = false
+    private var pendingDetailSections: [MeterDetailSection]?
+    private let footerLabel = NSTextField(labelWithString: "最近更新 尚未更新")
+    private var compactRows: [CompactMeterRowView] = []
+    private var values: [MeterValue?] = [nil, nil, nil]
+    private var refreshing = [false, false, false]
+    private var glmConfigured = false
+    private var detailSections: [MeterDetailSection] = []
+    private var sectionViews: [MeterDetailSectionView] = []
+    private let scrollView = NSScrollView()
+    private let documentView = DetailDocumentView()
     private var hoverAreas: [NSTrackingArea] = []
     private var hasNotch = false
     private var notchWidth: CGFloat = 185
+    private var notchOffset: CGFloat = MeterLayout.leftWing
     private var notchHeight: CGFloat = 32
     private var isExpanded = false
-    private var codexEdgePercent: Int?
-    private var claudeEdgePercent: Int?
-    private var codexPrimaryValue: MeterValue?
-    private var codexSecondaryValue: MeterValue?
-    private var claudePrimaryValue: MeterValue?
-    private var claudeSecondaryValue: MeterValue?
+    private var refreshTicker: Timer?
+    private var refreshPhase = 0
+    private var monitorReadings: [PinnedReading]?
+    private var monitorRows: [CompactMeterRowView] = []
+    var accountOrderChanged: (([UUID]) -> Void)?
 
-    private var bodyWidth: CGFloat {
-        if hasNotch && !isExpanded { return bounds.width }
-        return isExpanded ? min(360, bounds.width) : min(260, bounds.width)
+    private var headerHeight: CGFloat { MeterLayout.headerHeight(notchHeight: hasNotch ? notchHeight : 0) }
+    private var notchRange: NSRange? {
+        hasNotch ? NSRange(location: Int(notchOffset), length: Int(notchWidth)) : nil
     }
-
-    private var bodyHeight: CGFloat {
-        if hasNotch && isExpanded { return max(0, bounds.height - notchHeight) }
-        return bounds.height
+    private var wingRects: [NSRect] {
+        MeterLayout.wingRects(width: bounds.width, top: bounds.height, height: headerHeight, notch: notchRange)
     }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-
-        iconView.image = NSImage(systemSymbolName: "terminal.fill", accessibilityDescription: "Codex 余量")
-        iconView.contentTintColor = .white
-        iconView.imageScaling = .scaleProportionallyDown
-
-        valueLabel.textColor = .white
-        valueLabel.font = AppFont.ubuntuMonoBold(16)
-        valueLabel.alignment = .left
-        resetLabel.textColor = .white
-        resetLabel.font = AppFont.ubuntuMonoBold(16)
-        resetLabel.alignment = .right
-        codexSecondaryLabel.textColor = NSColor.white.withAlphaComponent(0.58)
-        codexSecondaryLabel.font = AppFont.ubuntuMono(10)
-        codexSecondaryLabel.alignment = .left
-        codexSecondaryLabel.isHidden = true
-        claudeSecondaryLabel.textColor = NSColor.white.withAlphaComponent(0.58)
-        claudeSecondaryLabel.font = AppFont.ubuntuMono(10)
-        claudeSecondaryLabel.alignment = .right
-        claudeSecondaryLabel.isHidden = true
-        headingLabel.textColor = NSColor.white.withAlphaComponent(0.72)
-        headingLabel.font = AppFont.ubuntuMono(12)
-        captionLabel.textColor = NSColor.white.withAlphaComponent(0.48)
-        captionLabel.font = AppFont.ubuntuMono(11)
-
-        [iconView, valueLabel, resetLabel, codexSecondaryLabel, claudeSecondaryLabel, headingLabel, captionLabel, barsView].forEach(addSubview)
-        toolTip = "Codex / Claude 余量"
+        for agent in MeterAgent.allCases {
+            let row = CompactMeterRowView(provider: agent)
+            compactRows.append(row)
+            addSubview(row)
+        }
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.documentView = documentView
+        addSubview(scrollView)
+        footerLabel.font = AppFont.ubuntuMono(10)
+        footerLabel.textColor = NSColor.white.withAlphaComponent(0.45)
+        footerLabel.lineBreakMode = .byTruncatingTail
+        addSubview(footerLabel)
+        documentView.insertionChanged = { [weak self] point in self?.updateInsertion(at: point) }
+        documentView.commitDrop = { [weak self] point in self?.commitDrop(at: point) ?? false }
+        toolTip = "Codex / Claude / GLM 余量 · 悬停查看详情，点击打开菜单"
     }
 
     required init?(coder: NSCoder) { nil }
 
-    func configure(hasNotch: Bool, notchWidth: CGFloat, notchHeight: CGFloat, expanded: Bool) {
+    func configure(hasNotch: Bool, notchWidth: CGFloat, notchHeight: CGFloat, expanded: Bool, notchOffset: CGFloat = MeterLayout.leftWing) {
         self.hasNotch = hasNotch
         self.notchWidth = notchWidth
-        self.notchHeight = max(1, notchHeight)
+        self.notchHeight = notchHeight
+        self.notchOffset = notchOffset
         isExpanded = expanded
-        needsDisplay = true
-        needsLayout = true
-        updateTrackingAreas()
-    }
-
-    func setCodex(primary: MeterValue?, secondary: MeterValue?) {
-        codexEdgePercent = Self.tightestPercent(primary, secondary)
-        (codexPrimaryValue, codexSecondaryValue) = Self.ordered(primary, secondary)
-        barsView.percent = codexEdgePercent ?? 0
         needsLayout = true
         needsDisplay = true
-        updateAccessibilityLabel()
     }
 
-    func setClaude(fiveHour: MeterValue?, sevenDay: MeterValue?) {
-        claudeEdgePercent = Self.tightestPercent(fiveHour, sevenDay)
-        (claudePrimaryValue, claudeSecondaryValue) = Self.ordered(fiveHour, sevenDay)
-        needsLayout = true
-        needsDisplay = true
-        updateAccessibilityLabel()
+    func setCodex(value: MeterValue?, isRefreshing: Bool = false) {
+        update(index: 0, value: value, refreshing: isRefreshing)
     }
 
-    /// The ring shows a single arc per side, so when both windows are present it tracks
-    /// whichever has less remaining — the one that actually gates further use.
-    private static func tightestPercent(_ a: MeterValue?, _ b: MeterValue?) -> Int? {
-        [a, b].compactMap { $0?.percent }.min().map { max(0, min(100, $0)) }
+    func setClaude(value: MeterValue?, isRefreshing: Bool = false) {
+        update(index: 1, value: value, refreshing: isRefreshing)
     }
 
-    /// Drops missing windows so a side with only a weekly quota still renders on the top line.
-    /// Keeps the declared order (five-hour before weekly) rather than sorting by urgency, so the
-    /// readout doesn't reshuffle itself as percentages drift.
-    private static func ordered(_ a: MeterValue?, _ b: MeterValue?) -> (MeterValue?, MeterValue?) {
-        let present = [a, b].compactMap { $0 }
-        return (present.first, present.count > 1 ? present[1] : nil)
+    func setGLM(value: MeterValue?, isRefreshing: Bool = false, isConfigured: Bool = true) {
+        glmConfigured = isConfigured
+        update(index: 2, value: value, refreshing: isRefreshing)
     }
 
-    /// One window as a single line: the percentage carries the weight, the countdown trails it
-    /// in smaller dim type. Two type sizes in one line is what keeps "52% 3H" from reading as
-    /// one mushed-together token.
-    private static func collapsedText(
-        _ value: MeterValue,
-        percentSize: CGFloat,
-        timeSize: CGFloat,
-        alignment: NSTextAlignment
-    ) -> NSAttributedString {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = alignment
-
-        let text = NSMutableAttributedString(string: "\(value.percent)%", attributes: [
-            .font: AppFont.ubuntuMonoBold(percentSize),
-            .foregroundColor: percentColor(value.percent),
-            .paragraphStyle: paragraph
-        ])
-        text.append(NSAttributedString(string: " \(value.resetText)", attributes: [
-            .font: AppFont.ubuntuMono(timeSize),
-            .foregroundColor: NSColor.white.withAlphaComponent(0.45),
-            .paragraphStyle: paragraph
-        ]))
-        return text
-    }
-
-    /// Colour only appears once a quota is worth worrying about, so a healthy meter stays plain
-    /// white rather than decorating every reading.
-    private static func percentColor(_ percent: Int) -> NSColor {
-        switch percent {
-        case 50...: return .white
-        case 20..<50: return NSColor(red: 1.00, green: 0.78, blue: 0.12, alpha: 1)
-        default: return NSColor(red: 1.00, green: 0.45, blue: 0.45, alpha: 1)
+    func setMonitor(readings: [PinnedReading], sections: [MonitorSection]) {
+        monitorReadings = Array(readings.prefix(3))
+        compactRows.forEach { $0.isHidden = true }
+        while monitorRows.count < min(3, readings.count) {
+            let row = CompactMeterRowView(provider: .codex)
+            monitorRows.append(row)
+            addSubview(row)
         }
+        for (index, row) in monitorRows.enumerated() { row.isHidden = index >= min(3, readings.count) }
+        setDetailSections(sections.map { section in
+            MeterDetailSection(agent: .codex, plan: section.plan,
+                rows: section.rows.map { MeterDetailRow(title: $0.title, value: $0.value, detail: $0.detail) },
+                accountID: section.accountID, accountTitle: section.title)
+        })
+        if readings.contains(where: \.refreshing), refreshTicker == nil {
+            let timer = Timer(timeInterval: 0.45, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.refreshPhase = (self.refreshPhase + 1) % 3
+                    self.needsLayout = true
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            refreshTicker = timer
+        } else if !readings.contains(where: \.refreshing) { stopRefreshAnimation() }
+        setAccessibilityLabel(readings.map { $0.title + "，" + ($0.refreshing ? "正在刷新" : $0.value + " " + $0.subtitle) }.joined(separator: "；"))
+        toolTip = readings.isEmpty ? "尚未固定连接 · 点击打开连接设置" : readings.map { $0.title + " " + $0.value }.joined(separator: " · ")
+        needsLayout = true
+        needsDisplay = true
     }
 
-    private func updateAccessibilityLabel() {
-        let codexText = codexEdgePercent.map { "Codex 剩余 \($0)%" } ?? "Codex 余量不可用"
-        let claudeText = claudeEdgePercent.map { "Claude 剩余 \($0)%" } ?? "Claude 未接入"
-        setAccessibilityLabel("\(codexText)，\(claudeText)")
+    private func update(index: Int, value: MeterValue?, refreshing: Bool) {
+        values[index] = value
+        self.refreshing[index] = refreshing
+        if self.refreshing.contains(true), refreshTicker == nil {
+            let timer = Timer(timeInterval: 0.45, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.refreshPhase = (self.refreshPhase + 1) % 3
+                    self.needsLayout = true
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            refreshTicker = timer
+        } else if !self.refreshing.contains(true) { stopRefreshAnimation() }
+        needsLayout = true
+        needsDisplay = true
+        updateAccessibility()
     }
 
-    var detailRowCount: Int { detailLeftLabels.count }
+    private func updateAccessibility() {
+        setAccessibilityLabel(Self.accessibilityText(
+            codexPercent: values[0]?.percent, claudePercent: values[1]?.percent,
+            codexRefreshing: self.refreshing[0], claudeRefreshing: self.refreshing[1],
+            glmPercent: values[2]?.percent, glmRefreshing: self.refreshing[2], glmConfigured: glmConfigured, order: agentOrder
+        ))
+    }
 
-    func setDetailRows(_ rows: [MeterDetailRow]) {
-        detailLeftLabels.forEach { $0.removeFromSuperview() }
-        detailRightLabels.forEach { $0.removeFromSuperview() }
-        detailLeftLabels.removeAll()
-        detailRightLabels.removeAll()
+    func stopRefreshAnimation() {
+        refreshTicker?.invalidate()
+        refreshTicker = nil
+        refreshPhase = 0
+    }
 
-        for row in rows {
-            let left = NSTextField(labelWithString: row.title)
-            left.textColor = NSColor.white.withAlphaComponent(0.92)
-            left.font = AppFont.ubuntuMono(12)
-            left.lineBreakMode = .byTruncatingTail
+    static func accessibilityText(codexPercent: Int?, claudePercent: Int?, codexRefreshing: Bool, claudeRefreshing: Bool,
+                                  glmPercent: Int? = nil, glmRefreshing: Bool = false, glmConfigured: Bool = false,
+                                  order: [MeterAgent] = MeterAgent.allCases) -> String {
+        let codex = codexRefreshing ? "Codex 正在刷新" : (codexPercent.map { "Codex 剩余 \($0)%" } ?? "Codex 余量不可用")
+        let claude = claudeRefreshing ? "Claude 正在刷新" : (claudePercent.map { "Claude 剩余 \($0)%" } ?? "Claude 未接入")
+        let glm = glmRefreshing ? "GLM 正在刷新" : (glmPercent.map { "GLM 剩余 \($0)%" } ?? (glmConfigured ? "GLM 余量不可用" : "GLM 未配置"))
+        let descriptions = [codex, claude, glm]
+        return order.map { descriptions[$0.index] }.joined(separator: "，")
+    }
 
-            let right = NSTextField(labelWithString: row.value)
-            right.textColor = NSColor.white.withAlphaComponent(0.62)
-            right.font = AppFont.ubuntuMono(12)
-            right.alignment = .right
-            right.lineBreakMode = .byTruncatingHead
+    var detailRowCount: Int { sectionViews.reduce(0) { $0 + $1.rowCount } }
 
-            addSubview(left)
-            addSubview(right)
-            detailLeftLabels.append(left)
-            detailRightLabels.append(right)
+    func setAgentOrder(_ order: [MeterAgent]) {
+        agentOrder = MeterAgentOrder.normalized(order.map(\.rawValue))
+        updateAccessibility()
+        needsLayout = true
+        needsDisplay = true
+    }
+
+    func setUpdateText(_ text: String) {
+        footerLabel.stringValue = text
+        footerLabel.toolTip = text + "（各来源中最近一次成功更新，时间均为本地时间）"
+    }
+
+    func setDetailSections(_ sections: [MeterDetailSection]) {
+        // Refreshes can complete during a drag; retain its source view until AppKit ends the session.
+        if isDragging { pendingDetailSections = sections; return }
+        guard sections != detailSections else { return }
+        detailSections = sections
+        sectionViews.forEach { $0.removeFromSuperview() }
+        sectionViews = sections.map { section in
+            let view = MeterDetailSectionView(section: section)
+            view.header.dragStarted = { [weak self, weak header = view.header] in
+                guard let self, let header else { return }
+                self.isDragging = true
+                self.documentView.activeSource = header
+                self.dragStateChanged?(true)
+            }
+            view.header.dragEnded = { [weak self] in
+                guard let self else { return }
+                self.isDragging = false
+                self.documentView.activeSource = nil
+                self.documentView.insertionY = nil
+                if let pending = self.pendingDetailSections {
+                    self.pendingDetailSections = nil
+                    self.setDetailSections(pending)
+                }
+                self.dragStateChanged?(false)
+            }
+            documentView.addSubview(view)
+            return view
         }
         needsLayout = true
+    }
+
+    func detailHeight(width: CGFloat) -> CGFloat {
+        sectionViews.reduce(0) { $0 + $1.preferredHeight(width: width) } + CGFloat(max(0, sectionViews.count - 1)) * MeterLayout.sectionGap
+    }
+
+    private func insertion(at point: NSPoint) -> (MeterAgent, Int, CGFloat)? {
+        guard let source = documentView.activeSource else { return nil }
+        let remaining = sectionViews.filter { $0.header.stableID != source.stableID }
+        let index = remaining.firstIndex(where: { point.y < $0.frame.midY }) ?? remaining.count
+        let y = index < remaining.count ? remaining[index].frame.minY - MeterLayout.sectionGap / 2
+            : (remaining.last?.frame.maxY ?? 0) + MeterLayout.sectionGap / 2
+        return (source.provider, index, max(1, min(documentView.bounds.height - 1, y)))
+    }
+
+    private func updateInsertion(at point: NSPoint?) {
+        documentView.insertionY = point.flatMap { insertion(at: $0)?.2 }
+    }
+
+    private func commitDrop(at point: NSPoint) -> Bool {
+        if monitorReadings != nil, let source = documentView.activeSource, let sourceID = UUID(uuidString: source.stableID) {
+            var remaining = sectionViews.filter { $0.header.stableID != source.stableID }
+            let index = remaining.firstIndex(where: { point.y < $0.frame.midY }) ?? remaining.count
+            if let view = sectionViews.first(where: { $0.header.stableID == source.stableID }) { remaining.insert(view, at: index) }
+            let ids = remaining.compactMap { UUID(uuidString: $0.header.stableID) }
+            guard ids.contains(sourceID) else { return false }
+            accountOrderChanged?(ids)
+            return true
+        }
+        guard let (provider, index, _) = insertion(at: point) else { return false }
+        let order = MeterAgentOrder.moving(provider, to: index, in: agentOrder)
+        setAgentOrder(order)
+        orderChanged?(order)
+        return true
     }
 
     override func layout() {
         super.layout()
-        let bodyX = (bounds.width - bodyWidth) / 2
-
-        if isExpanded {
-            valueLabel.font = AppFont.ubuntuMonoBold(16)
-            resetLabel.font = AppFont.ubuntuMonoBold(16)
-            iconView.isHidden = true
-            headingLabel.isHidden = true
-            captionLabel.isHidden = true
-            barsView.isHidden = true
-            valueLabel.isHidden = false
-            resetLabel.isHidden = false
-            codexSecondaryLabel.isHidden = true
-            claudeSecondaryLabel.isHidden = true
-
-            if hasNotch {
-                layoutNotchTopLabels()
+        if let readings = monitorReadings {
+            for (position, rect) in MeterLayout.rows(in: wingRects[0], count: readings.count).enumerated() {
+                let reading = readings[position]
+                let row = monitorRows[position]
+                row.frame = rect
+                row.displayTitle = reading.title
+                row.toolTip = reading.title + " · " + reading.value + " " + reading.subtitle
+                row.update(percent: reading.refreshing ? String(repeating: "·", count: refreshPhase + 1) : reading.value,
+                           time: reading.refreshing ? "" : reading.subtitle)
+            }
+        } else { for (position, rect) in MeterLayout.rows(in: wingRects[0]).enumerated() {
+            let index = agentOrder[position].index
+            let row = compactRows[index]
+            row.frame = rect
+            let period = values[index]?.secondaryPercent == nil
+                ? (values[index]?.durationMinutes == 10_080 ? "周余量及重置倒计时" : "5 小时余量及重置倒计时")
+                : "5 小时余量/周余量，5 小时重置倒计时/周重置倒计时"
+            row.toolTip = "\(agentOrder[position].title)：\(period)。双进度条左侧为 5 小时，右侧为周额度。"
+            if refreshing[index] {
+                row.update(percent: String(repeating: "·", count: refreshPhase + 1), time: "")
+            } else if let value = values[index] {
+                row.update(percent: value.percentText, time: value.countdownText)
             } else {
-                valueLabel.frame = NSRect(x: bodyX + 20, y: bodyHeight - 28, width: 90, height: 22)
-                resetLabel.frame = NSRect(x: bodyX + bodyWidth - 110, y: bodyHeight - 28, width: 90, height: 22)
+                row.update(percent: index == 2 && !glmConfigured ? "未配置" : "--%", time: index == 2 && !glmConfigured ? "" : "--H")
             }
-
-            for index in detailLeftLabels.indices {
-                let rowY = hasNotch ? bodyHeight - 27 - CGFloat(index * 22) : 14 - CGFloat(index * 22)
-                detailLeftLabels[index].isHidden = false
-                detailRightLabels[index].isHidden = false
-                detailLeftLabels[index].frame = NSRect(x: bodyX + 20, y: rowY, width: 120, height: 18)
-                detailRightLabels[index].frame = NSRect(
-                    x: bodyX + bodyWidth - 160,
-                    y: rowY,
-                    width: 140,
-                    height: 18
-                )
-            }
-            return
-        }
-
-        valueLabel.isHidden = false
-        detailLeftLabels.forEach { $0.isHidden = true; $0.frame = .zero }
-        detailRightLabels.forEach { $0.isHidden = true; $0.frame = .zero }
-        if hasNotch {
-            valueLabel.font = AppFont.ubuntuMonoBold(12)
-            resetLabel.font = AppFont.ubuntuMonoBold(12)
-            iconView.isHidden = true
-            resetLabel.isHidden = false
-            headingLabel.isHidden = true
-            captionLabel.isHidden = true
-            barsView.isHidden = true
-            layoutNotchTopLabels()
-            headingLabel.frame = .zero
-            captionLabel.frame = .zero
-            barsView.frame = .zero
-        } else {
-            valueLabel.font = AppFont.ubuntuMonoBold(16)
-            // This fallback pill only has room for Codex's headline percent — the two-line
-            // breakdown is reserved for the notch wings, where there's room for it.
-            valueLabel.stringValue = codexEdgePercent.map { "\($0)%" } ?? "--%"
-            codexSecondaryLabel.isHidden = true
-            claudeSecondaryLabel.isHidden = true
-            iconView.isHidden = false
-            resetLabel.isHidden = true
-            headingLabel.isHidden = false
-            captionLabel.isHidden = false
-            barsView.isHidden = false
-            iconView.frame = NSRect(x: bodyX + 17, y: 17, width: 24, height: 24)
-            headingLabel.frame = NSRect(x: bodyX + 52, y: 30, width: 110, height: 17)
-            valueLabel.alignment = .left
-            valueLabel.frame = NSRect(x: bodyX + 52, y: 12, width: 64, height: 18)
-            captionLabel.frame = NSRect(x: bodyX + 106, y: 12, width: 86, height: 17)
-            barsView.frame = NSRect(x: bodyX + bodyWidth - 51, y: 18, width: 35, height: 22)
-        }
-    }
-
-    /// In collapsed notch mode, a side with two windows splits into two stacked lines (primary
-    /// on top, brighter; secondary below, dimmer) instead of cramming both onto one line. A side
-    /// with only one window gets that line centered across the full wing height, as before.
-    /// Expanded mode always uses the single-line form — full detail lives in the rows below.
-    /// Collapsed notch: each wing is a small stat block, one line per quota window, vertically
-    /// centred in the notch band so a side with one window and a side with two still look like
-    /// the same design rather than a rendering glitch. Expanded mode drops back to a single plain
-    /// headline per side, because the full breakdown is already listed in the rows underneath.
-    /// Collapsed notch: each wing is sized to its own data — a wing reporting two windows stacks
-    /// them as a centred block, a wing reporting one centres that single reading in the notch band
-    /// so it never looks top-heavy against an empty second row.
-    private func layoutNotchTopLabels() {
-        let wingWidth = (bounds.width - notchWidth) / 2
-        let outerPadding: CGFloat = 14
-        let labelWidth = max(0, wingWidth - outerPadding)
-        let rightX = wingWidth + notchWidth
-        let bandBottom = bounds.height - notchHeight
-
+        } }
+        scrollView.isHidden = !isExpanded
+        footerLabel.isHidden = !isExpanded
         if isExpanded {
-            valueLabel.alignment = .left
-            valueLabel.stringValue = codexPrimaryValue?.text ?? "--%"
-            valueLabel.frame = NSRect(x: outerPadding, y: bandBottom, width: labelWidth, height: 22)
-            resetLabel.alignment = .right
-            resetLabel.stringValue = claudePrimaryValue?.text ?? "--%"
-            resetLabel.frame = NSRect(x: rightX, y: bandBottom, width: labelWidth, height: 22)
-            codexSecondaryLabel.isHidden = true
-            claudeSecondaryLabel.isHidden = true
-            return
+            let padding = MeterLayout.detailPadding
+            footerLabel.frame = NSRect(x: padding, y: padding, width: bounds.width - padding * 2, height: MeterLayout.footerHeight)
+            scrollView.frame = NSRect(x: padding, y: padding + MeterLayout.footerHeight + MeterLayout.footerGap,
+                                      width: bounds.width - padding * 2,
+                                      height: max(0, bounds.height - headerHeight - MeterLayout.detailChromeHeight))
+            let width = scrollView.contentSize.width
+            documentView.frame = NSRect(x: 0, y: 0, width: width, height: detailHeight(width: width))
+            var y: CGFloat = 0
+            for section in sectionViews {
+                let height = section.preferredHeight(width: width)
+                section.frame = NSRect(x: 0, y: y, width: width, height: height)
+                y += height + MeterLayout.sectionGap
+            }
         }
-
-        layoutWing(
-            primaryLabel: valueLabel,
-            secondaryLabel: codexSecondaryLabel,
-            primary: codexPrimaryValue,
-            secondary: codexSecondaryValue,
-            x: outerPadding,
-            width: labelWidth,
-            bandBottom: bandBottom,
-            alignment: .left
-        )
-        layoutWing(
-            primaryLabel: resetLabel,
-            secondaryLabel: claudeSecondaryLabel,
-            primary: claudePrimaryValue,
-            secondary: claudeSecondaryValue,
-            x: rightX,
-            width: labelWidth,
-            bandBottom: bandBottom,
-            alignment: .right
-        )
-    }
-
-    private func layoutWing(
-        primaryLabel: NSTextField,
-        secondaryLabel: NSTextField,
-        primary: MeterValue?,
-        secondary: MeterValue?,
-        x: CGFloat,
-        width: CGFloat,
-        bandBottom: CGFloat,
-        alignment: NSTextAlignment
-    ) {
-        primaryLabel.alignment = alignment
-        secondaryLabel.alignment = alignment
-
-        guard let primary else {
-            let height: CGFloat = 15
-            primaryLabel.stringValue = "--%"
-            primaryLabel.frame = NSRect(
-                x: x,
-                y: bandBottom + (notchHeight - height) / 2,
-                width: width,
-                height: height
-            )
-            secondaryLabel.isHidden = true
-            return
-        }
-
-        guard let secondary else {
-            let height: CGFloat = 15
-            primaryLabel.attributedStringValue = Self.collapsedText(
-                primary,
-                percentSize: 12.5,
-                timeSize: 10,
-                alignment: alignment
-            )
-            primaryLabel.frame = NSRect(
-                x: x,
-                y: bandBottom + (notchHeight - height) / 2,
-                width: width,
-                height: height
-            )
-            secondaryLabel.isHidden = true
-            return
-        }
-
-        let firstRowHeight: CGFloat = 13
-        let secondRowHeight: CGFloat = 12
-        let block = firstRowHeight + secondRowHeight
-        let blockTop = bandBottom + (notchHeight + block) / 2
-
-        primaryLabel.attributedStringValue = Self.collapsedText(
-            primary,
-            percentSize: 11.5,
-            timeSize: 9,
-            alignment: alignment
-        )
-        primaryLabel.frame = NSRect(x: x, y: blockTop - firstRowHeight, width: width, height: firstRowHeight)
-        secondaryLabel.attributedStringValue = Self.collapsedText(
-            secondary,
-            percentSize: 10.5,
-            timeSize: 8.5,
-            alignment: alignment
-        )
-        secondaryLabel.frame = NSRect(x: x, y: blockTop - block, width: width, height: secondRowHeight)
-        secondaryLabel.isHidden = false
+        updateTrackingAreas()
     }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         NSColor.black.setFill()
-        if hasNotch {
-            notchSurfacePath(topRadius: 6, bottomRadius: 14).fill()
-        } else {
-            let bodyRect = NSRect(x: (bounds.width - bodyWidth) / 2, y: 0, width: bodyWidth, height: bodyHeight)
-            NSBezierPath(roundedRect: bodyRect, xRadius: isExpanded ? 14 : 18, yRadius: isExpanded ? 14 : 18).fill()
-        }
-        if hasNotch && !isExpanded { drawCollapsedEdgeProgress() }
+        NSBezierPath(roundedRect: bounds, xRadius: hasNotch ? 10 : 16, yRadius: hasNotch ? 10 : 16).fill()
+        // Fill the top corners against the physical screen edge, keeping rounded lower corners.
+        if hasNotch { NSRect(x: 0, y: bounds.maxY - 10, width: bounds.width, height: 10).fill() }
+        if let readings = monitorReadings {
+            if readings.isEmpty {
+                let text = NSAttributedString(string: "连接设置", attributes: [.font: AppFont.ubuntuMono(10), .foregroundColor: NSColor.white])
+                text.draw(at: NSPoint(x: 8, y: bounds.maxY - headerHeight / 2 - text.size().height / 2))
+            }
+            for (position, rect) in MeterLayout.rows(in: wingRects[1], count: readings.count).enumerated() {
+                let reading = readings[position]
+                if reading.percent != nil {
+                    for (index, track) in MeterLayout.progressTracks(in: rect, paired: reading.secondaryPercent != nil).enumerated() {
+                        drawProgress(percent: index == 0 ? reading.percent : reading.secondaryPercent, in: track)
+                    }
+                } else {
+                    let text = NSAttributedString(string: reading.title, attributes: [.font: AppFont.ubuntuMono(8), .foregroundColor: NSColor.white.withAlphaComponent(0.55)])
+                    text.draw(with: rect, options: [.truncatesLastVisibleLine])
+                }
+            }
+        } else { for (position, rect) in MeterLayout.rows(in: wingRects[1]).enumerated() {
+            let value = values[agentOrder[position].index]
+            let tracks = MeterLayout.progressTracks(in: rect, paired: value?.secondaryPercent != nil)
+            let percentages = [value?.percent, value?.secondaryPercent]
+            for (index, track) in tracks.enumerated() {
+                drawProgress(percent: percentages[index], in: track)
+            }
+        } }
     }
 
-    private func notchSurfacePath(topRadius: CGFloat, bottomRadius: CGFloat) -> NSBezierPath {
-        let path = NSBezierPath()
-        let left = bounds.minX
-        let right = bounds.maxX
-        let bottom = bounds.minY
-        let top = bounds.maxY
-        path.move(to: NSPoint(x: left, y: top))
-        appendQuadratic(to: NSPoint(x: left + topRadius, y: top - topRadius), control: NSPoint(x: left + topRadius, y: top), on: path)
-        path.line(to: NSPoint(x: left + topRadius, y: bottom + bottomRadius))
-        appendQuadratic(to: NSPoint(x: left + topRadius + bottomRadius, y: bottom), control: NSPoint(x: left + topRadius, y: bottom), on: path)
-        path.line(to: NSPoint(x: right - topRadius - bottomRadius, y: bottom))
-        appendQuadratic(to: NSPoint(x: right - topRadius, y: bottom + bottomRadius), control: NSPoint(x: right - topRadius, y: bottom), on: path)
-        path.line(to: NSPoint(x: right - topRadius, y: top - topRadius))
-        appendQuadratic(to: NSPoint(x: right, y: top), control: NSPoint(x: right - topRadius, y: top), on: path)
-        path.close()
-        return path
-    }
-
-    /// Half the notch outline, starting at the top-left corner and growing down/inward to the
-    /// bottom midpoint. Fed to `EdgePathTrimmer`, this draws Codex's ring "growing" from the
-    /// top-left corner — mirrored by `rightEdgePath()` for Claude.
-    private func leftEdgePath() -> NSBezierPath {
-        let path = NSBezierPath()
-        let inset: CGFloat = 0.75
-        let topRadius: CGFloat = 6
-        let bottomRadius: CGFloat = 14
-        let topY = bounds.maxY - inset
-        let bottomY = bounds.minY + inset
-        let leftVerticalX = bounds.minX + topRadius + inset
-        let midX = bounds.midX
-
-        path.move(to: NSPoint(x: bounds.minX + inset, y: topY))
-        appendQuadratic(to: NSPoint(x: leftVerticalX, y: topY - topRadius), control: NSPoint(x: leftVerticalX, y: topY), on: path)
-        path.line(to: NSPoint(x: leftVerticalX, y: bottomY + bottomRadius))
-        appendQuadratic(to: NSPoint(x: leftVerticalX + bottomRadius, y: bottomY), control: NSPoint(x: leftVerticalX, y: bottomY), on: path)
-        path.line(to: NSPoint(x: midX, y: bottomY))
-        return path
-    }
-
-    /// Mirror of `leftEdgePath()`: starts at the top-right corner, grows down/inward to the
-    /// bottom midpoint.
-    private func rightEdgePath() -> NSBezierPath {
-        let path = NSBezierPath()
-        let inset: CGFloat = 0.75
-        let topRadius: CGFloat = 6
-        let bottomRadius: CGFloat = 14
-        let topY = bounds.maxY - inset
-        let bottomY = bounds.minY + inset
-        let rightVerticalX = bounds.maxX - topRadius - inset
-        let midX = bounds.midX
-
-        path.move(to: NSPoint(x: bounds.maxX - inset, y: topY))
-        appendQuadratic(to: NSPoint(x: rightVerticalX, y: topY - topRadius), control: NSPoint(x: rightVerticalX, y: topY), on: path)
-        path.line(to: NSPoint(x: rightVerticalX, y: bottomY + bottomRadius))
-        appendQuadratic(to: NSPoint(x: rightVerticalX - bottomRadius, y: bottomY), control: NSPoint(x: rightVerticalX, y: bottomY), on: path)
-        path.line(to: NSPoint(x: midX, y: bottomY))
-        return path
-    }
-
-    private func appendQuadratic(to end: NSPoint, control: NSPoint, on path: NSBezierPath) {
-        let start = path.currentPoint
-        let control1 = NSPoint(x: start.x + (control.x - start.x) * 2 / 3, y: start.y + (control.y - start.y) * 2 / 3)
-        let control2 = NSPoint(x: end.x + (control.x - end.x) * 2 / 3, y: end.y + (control.y - end.y) * 2 / 3)
-        path.curve(to: end, controlPoint1: control1, controlPoint2: control2)
-    }
-
-    private func drawCollapsedEdgeProgress() {
-        drawEdgeRing(percent: codexEdgePercent, fullPath: leftEdgePath())
-        drawEdgeRing(percent: claudeEdgePercent, fullPath: rightEdgePath())
-    }
-
-    private func drawEdgeRing(percent: Int?, fullPath: NSBezierPath) {
-        guard let percent, percent > 0 else { return }
-        let progress = EdgePathTrimmer.trim(fullPath, fraction: CGFloat(percent) / 100)
-        progress.lineCapStyle = .round
-        progress.lineJoinStyle = .round
-
-        let palette = Self.ringPalette(forRemainingPercent: percent)
-
-        progress.lineWidth = 6
-        palette.glow.withAlphaComponent(0.13).setStroke()
-        progress.stroke()
-        progress.lineWidth = 3.4
-        palette.glow.withAlphaComponent(0.27).setStroke()
-        progress.stroke()
-
-        guard let context = NSGraphicsContext.current?.cgContext else { return }
-        context.saveGState()
-        let strokedPath = progress.cgPath.copy(strokingWithWidth: 1.7, lineCap: .round, lineJoin: .round, miterLimit: 10)
-        context.addPath(strokedPath)
-        context.clip()
-        let colors = [palette.start.cgColor, palette.middle.cgColor, palette.end.cgColor] as CFArray
-        if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 0.72, 1]) {
-            let gradientBounds = fullPath.bounds
-            context.drawLinearGradient(
-                gradient,
-                start: NSPoint(x: gradientBounds.minX, y: gradientBounds.midY),
-                end: NSPoint(x: gradientBounds.maxX, y: gradientBounds.midY),
-                options: [.drawsBeforeStartLocation, .drawsAfterEndLocation]
-            )
-        }
-        context.restoreGState()
-    }
-
-    private static func ringPalette(forRemainingPercent percent: Int) -> (start: NSColor, middle: NSColor, end: NSColor, glow: NSColor) {
+    private func drawProgress(percent: Int?, in track: NSRect) {
+        NSColor.white.withAlphaComponent(0.15).setFill()
+        NSBezierPath(roundedRect: track, xRadius: 1, yRadius: 1).fill()
+        guard let percent else { return }
         switch percent {
-        case 50...:
-            return (
-                NSColor(red: 0.08, green: 0.66, blue: 0.36, alpha: 1),
-                NSColor(red: 0.22, green: 0.94, blue: 0.52, alpha: 1),
-                NSColor(red: 0.76, green: 1.00, blue: 0.84, alpha: 1),
-                NSColor(red: 0.20, green: 0.92, blue: 0.50, alpha: 1)
-            )
-        case 20..<50:
-            return (
-                NSColor(red: 0.94, green: 0.52, blue: 0.05, alpha: 1),
-                NSColor(red: 1.00, green: 0.78, blue: 0.12, alpha: 1),
-                NSColor(red: 1.00, green: 0.95, blue: 0.58, alpha: 1),
-                NSColor(red: 1.00, green: 0.72, blue: 0.10, alpha: 1)
-            )
-        default:
-            return (
-                NSColor(red: 0.82, green: 0.12, blue: 0.20, alpha: 1),
-                NSColor(red: 1.00, green: 0.28, blue: 0.30, alpha: 1),
-                NSColor(red: 1.00, green: 0.72, blue: 0.68, alpha: 1),
-                NSColor(red: 1.00, green: 0.24, blue: 0.28, alpha: 1)
-            )
+        case 50...: NSColor(red: 0.22, green: 0.94, blue: 0.52, alpha: 1).setFill()
+        case 20..<50: NSColor(red: 1, green: 0.78, blue: 0.12, alpha: 1).setFill()
+        default: NSColor(red: 1, green: 0.28, blue: 0.30, alpha: 1).setFill()
         }
+        let progress = NSRect(x: track.minX, y: track.minY, width: track.width * CGFloat(max(0, min(100, percent))) / 100, height: track.height)
+        NSBezierPath(roundedRect: progress, xRadius: 1, yRadius: 1).fill()
+    }
+
+    private var activeRects: [NSRect] {
+        var rects = wingRects
+        if isExpanded { rects.append(NSRect(x: 0, y: 0, width: bounds.width, height: max(0, bounds.height - headerHeight))) }
+        return rects
     }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         hoverAreas.forEach(removeTrackingArea)
-        hoverAreas.removeAll()
-        let rects: [NSRect]
-        if hasNotch && !isExpanded {
-            let wingWidth = (bounds.width - notchWidth) / 2
-            rects = [
-                NSRect(x: 0, y: 0, width: wingWidth, height: bounds.height),
-                NSRect(x: bounds.width - wingWidth, y: 0, width: wingWidth, height: bounds.height)
-            ]
-        } else {
-            rects = [activeBodyRect]
+        hoverAreas = activeRects.map {
+            NSTrackingArea(rect: $0, options: [.mouseEnteredAndExited, .activeAlways], owner: self, userInfo: nil)
         }
-        for rect in rects {
-            let area = NSTrackingArea(rect: rect, options: [.mouseEnteredAndExited, .activeAlways], owner: self, userInfo: nil)
-            addTrackingArea(area)
-            hoverAreas.append(area)
-        }
+        hoverAreas.forEach(addTrackingArea)
     }
 
     override func mouseEntered(with event: NSEvent) { hoverChanged?(true) }
@@ -656,19 +490,8 @@ final class NotchMeterView: NSControl {
 
     func containsScreenPoint(_ point: NSPoint) -> Bool {
         guard let window else { return false }
-        let windowPoint = window.convertPoint(fromScreen: point)
-        let localPoint = convert(windowPoint, from: nil)
-        if hasNotch && !isExpanded {
-            guard bounds.contains(localPoint) else { return false }
-            let wingWidth = (bounds.width - notchWidth) / 2
-            return localPoint.x <= wingWidth || localPoint.x >= bounds.width - wingWidth
-        }
-        return activeBodyRect.contains(localPoint)
-    }
-
-    private var activeBodyRect: NSRect {
-        if hasNotch && isExpanded { return bounds }
-        return NSRect(x: (bounds.width - bodyWidth) / 2, y: 0, width: bodyWidth, height: bodyHeight)
+        let local = convert(window.convertPoint(fromScreen: point), from: nil)
+        return activeRects.contains { $0.contains(local) }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -696,9 +519,10 @@ final class NotchPanelController {
     private var hoverPollTimer: Timer?
     private var pointerInside = false
 
-    init(menuProvider: @escaping () -> NSMenu) {
+    init(menuProvider: @escaping () -> NSMenu, orderChanged: @escaping ([MeterAgent]) -> Void) {
         meterView = NotchMeterView(frame: .zero)
         meterView.menuProvider = menuProvider
+        meterView.orderChanged = orderChanged
         panel = CodexNotchPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.contentView = meterView
         panel.isFloatingPanel = true
@@ -714,6 +538,14 @@ final class NotchPanelController {
         panel.isMovable = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         meterView.hoverChanged = { [weak self] hovering in self?.handleNativeHover(hovering) }
+        meterView.dragStateChanged = { [weak self] dragging in
+            guard let self else { return }
+            self.pendingCollapse?.cancel()
+            if !dragging {
+                self.applyFrame(animated: true)
+                self.handleHoverSignal(self.meterView.containsScreenPoint(NSEvent.mouseLocation))
+            }
+        }
         panel.orderFrontRegardless()
         reposition()
         hoverPollTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
@@ -721,18 +553,37 @@ final class NotchPanelController {
         }
     }
 
-    func setCodex(primary: MeterValue?, secondary: MeterValue?) { meterView.setCodex(primary: primary, secondary: secondary) }
-    func setClaude(fiveHour: MeterValue?, sevenDay: MeterValue?) { meterView.setClaude(fiveHour: fiveHour, sevenDay: sevenDay) }
+    func setCodex(value: MeterValue?, isRefreshing: Bool = false) {
+        meterView.setCodex(value: value, isRefreshing: isRefreshing)
+    }
+
+    func setClaude(value: MeterValue?, isRefreshing: Bool = false) {
+        meterView.setClaude(value: value, isRefreshing: isRefreshing)
+    }
+
+    func setGLM(value: MeterValue?, isRefreshing: Bool = false, isConfigured: Bool = true) {
+        meterView.setGLM(value: value, isRefreshing: isRefreshing, isConfigured: isConfigured)
+    }
 
     func invalidate() {
         pendingCollapse?.cancel()
         hoverPollTimer?.invalidate()
         hoverPollTimer = nil
+        meterView.stopRefreshAnimation()
     }
 
-    func setDetailRows(_ rows: [MeterDetailRow]) {
-        meterView.setDetailRows(rows)
-        if isExpanded { applyFrame(animated: true) }
+    func setDetailSections(_ sections: [MeterDetailSection]) {
+        meterView.setDetailSections(sections)
+        if isExpanded && !meterView.isDragging { applyFrame(animated: true) }
+    }
+
+    func setAgentOrder(_ order: [MeterAgent]) { meterView.setAgentOrder(order) }
+    func setUpdateText(_ text: String) { meterView.setUpdateText(text) }
+
+    func setMonitor(readings: [PinnedReading], sections: [MonitorSection], orderChanged: @escaping ([UUID]) -> Void) {
+        meterView.accountOrderChanged = orderChanged
+        meterView.setMonitor(readings: readings, sections: sections)
+        if isExpanded && !meterView.isDragging { applyFrame(animated: false) }
     }
 
     func reposition() {
@@ -741,7 +592,7 @@ final class NotchPanelController {
         hasNotch = screen.safeAreaInsets.top > 0 && screen.auxiliaryTopLeftArea != nil
         notchHeight = hasNotch ? screen.safeAreaInsets.top : 32
         if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
-            notchWidth = max(132, right.minX - left.maxX)
+            notchWidth = max(0, right.minX - left.maxX)
         } else {
             notchWidth = 132
         }
@@ -750,11 +601,12 @@ final class NotchPanelController {
 
     private func setHovering(_ hovering: Bool) {
         pendingCollapse?.cancel()
+        guard !meterView.isDragging else { return }
         if hovering {
             setExpanded(true)
         } else {
             let work = DispatchWorkItem { [weak self] in
-                guard let self, !self.meterView.containsScreenPoint(NSEvent.mouseLocation) else { return }
+                guard let self, !self.meterView.isDragging, !self.meterView.containsScreenPoint(NSEvent.mouseLocation) else { return }
                 self.setExpanded(false)
             }
             pendingCollapse = work
@@ -788,23 +640,18 @@ final class NotchPanelController {
 
     private func applyFrame(animated: Bool) {
         guard let screen else { return }
-        let collapsedWidth: CGFloat = hasNotch ? notchWidth + 168 : 272
-        let panelWidth: CGFloat = isExpanded ? max(collapsedWidth, 320) : collapsedWidth
-        let collapsedHeight: CGFloat = hasNotch ? notchHeight + 2 : 62
-        let expandedBodyHeight = max(42, 16 + CGFloat(meterView.detailRowCount * 22))
-        let panelHeight: CGFloat = isExpanded ? (hasNotch ? notchHeight + expandedBodyHeight : 78) : collapsedHeight
-        let centerX: CGFloat
-        if hasNotch, let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
-            centerX = (left.maxX + right.minX) / 2
+        let panelWidth = hasNotch ? notchWidth + MeterLayout.leftWing + MeterLayout.rightWing : MeterLayout.capsuleWidth
+        let headerHeight = MeterLayout.headerHeight(notchHeight: hasNotch ? notchHeight : 0)
+        let detailHeight = min(meterView.detailHeight(width: panelWidth - MeterLayout.detailPadding * 2) + MeterLayout.detailChromeHeight, screen.visibleFrame.height * 0.75)
+        let panelHeight = headerHeight + (isExpanded ? detailHeight : 0)
+        let x: CGFloat
+        if hasNotch, let left = screen.auxiliaryTopLeftArea {
+            x = left.maxX - MeterLayout.leftWing
         } else {
-            centerX = screen.frame.midX
+            x = screen.frame.midX - panelWidth / 2
         }
-        let frame = NSRect(
-            x: (centerX - panelWidth / 2).rounded(),
-            y: (screen.frame.maxY - panelHeight).rounded(),
-            width: panelWidth.rounded(),
-            height: panelHeight.rounded()
-        )
+        let frame = NSRect(x: x.rounded(), y: (screen.frame.maxY - panelHeight).rounded(),
+                           width: panelWidth.rounded(), height: panelHeight.rounded())
         meterView.configure(hasNotch: hasNotch, notchWidth: notchWidth, notchHeight: notchHeight, expanded: isExpanded)
         if animated {
             NSAnimationContext.runAnimationGroup { context in

@@ -6,7 +6,27 @@ body:
   - type: markdown
     attributes:
       value: |
-        Do not include tokens, cookies, credentials, or a complete private Codex configuration.
+        Do not include tokens, cookies, credentials, complete provider responses, or session files. Synthetic or redacted usage fields are sufficient.
+  - type: input
+    id: app-version
+    attributes:
+      label: Codex Meter version or commit
+      description: Include whether this is a source build.
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Source ID and region
+      placeholder: minimax-global, Cursor local, custom HTTPS
+    validations:
+      required: true
+  - type: input
+    id: authentication
+    attributes:
+      label: Authentication method
+      description: Method and permission scope only; never include credential values.
+      placeholder: Current CLI, independent OAuth file, API key, admin key, cookie, device login
   - type: input
     id: macos
     attributes:
@@ -17,10 +37,8 @@ body:
   - type: input
     id: codex
     attributes:
-      label: Codex version
-      description: Output of `codex --version`
-    validations:
-      required: true
+      label: Relevant CLI or external tool version (if applicable)
+      description: Include Codex, Claude Code, Kiro, Magpie or CC Switch version when relevant.
   - type: textarea
     id: steps
     attributes:

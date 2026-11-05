@@ -1,43 +1,46 @@
 # Codex Meter
 
-[中文](README.md) · [Privacy](PRIVACY.md) · [Security](SECURITY.md)
+[中文](README.md) · [Provider matrix](docs/providers.md) · [Migration](docs/migration.md) · [Privacy](PRIVACY.md) · [Security](SECURITY.md)
 
-Codex Meter is a lightweight native macOS utility that displays local Codex usage around the physical MacBook notch.
+A native macOS monitor for AI subscription quotas, reset windows, API balances, tokens, and costs, displayed around the MacBook notch or in a centered capsule.
 
-- Remaining percentage on the left
-- Time until reset on the right, using `D`, `H`, and `M`
-- A green, yellow, or red gradient along the notch edge
-- Reset-credit expirations in a compact hover panel
-- A local system notification when consecutive refreshes detect a quota reset
-- Full rate-limit details, refresh, launch-at-login, and quit actions in the click menu
+- Independent named accounts, credentials, regions, refreshes, and error states.
+- Pin up to three connections and choose their main metric. Hover for all enabled accounts; drag headings to reorder.
+- Built-in read paths for Codex, Claude, GLM/Z.ai, Kimi, MiniMax, Copilot, Gemini, Cursor, and more. Consult the [matrix](docs/providers.md): registry entries include regional variants, templates, and retired APIs, and are not a count of verified services.
+- Custom HTTP request forms and JSON field mapping, including arrays, scaling, reset times, and template import/export. No arbitrary script execution.
+- Existing CLI/app sessions, independent OAuth files, API keys, web cookies, and Copilot device authorization.
+- A separate statistics window with today/7-day/30-day filters, trends, and grouping by tool, account, or model.
+- Opt-in local log scanning with incremental cursors, stable event IDs, and explicit unknown-account/unknown-price states.
+- Provider-reported values, estimates, currencies, local logs, and external imports remain separate.
+- Keychain credentials, timestamped stale data, bounded concurrency, and backoff. Paid inference probes are off by default.
 
-> [!IMPORTANT]
-> This is an unofficial community project. It is not affiliated with or endorsed by OpenAI. Codex is a product and trademark of OpenAI.
+On 2026-10-27, this revision passed its Universal 2 build, local signature verification and installed-binary comparison, and replaced the local installed app. Unit tests, provider-by-provider account verification and native UI acceptance have not been performed. Updated screenshots are pending native acceptance.
 
-## Preview
+This is an unofficial community project, not affiliated with or endorsed by any provider. Product names and trademarks belong to their owners.
 
-| Default | Hover |
-| --- | --- |
-| ![Codex Meter default state with remaining percentage on the left and reset time on the right](docs/images/codex-meter-collapsed.png) | ![Codex Meter hover state with reset-credit expiration times](docs/images/codex-meter-expanded.png) |
+## Getting started
 
-## How it works
+1. Click the notch/capsule and open **连接设置…** (Connections).
+2. Add a source and configure a local session, independent account file, API key, or web login.
+3. Optionally preview the connection, then save and enable it.
+4. Pin up to three accounts and select their main metric.
+5. Open **用量统计…** (Usage) to enable local scanning and configure paths and prices.
 
-The app launches the locally installed `codex app-server --stdio` process and reads the rate limits associated with the current local Codex login. It does not implement its own authentication flow and does not ask for or persist access tokens.
+The local Codex mode still delegates authentication to `codex app-server --stdio`. Independent accounts can use their own OAuth files. Claude tries the non-inference usage endpoint first; billed probes run only when explicitly enabled.
 
-If an account has been synchronized by auth.js or another tool, it will work when the local Codex app-server recognizes that login state.
+Legacy GLM credentials can be reused or explicitly copied into a new account-specific Keychain item without deleting the old item. See [migration](docs/migration.md) and the [historical authentication reference](docs/legacy-authentication.md).
 
-Usage snapshots remain in memory only. Authentication and network access are handled by the local Codex process. See [PRIVACY.md](PRIVACY.md) for details.
+## Custom and external sources
 
-## Requirements
+Configure URL, GET/POST, headers, and JSON paths such as `data.balance` or `items[0].remaining`. Authentication headers reference `${token}`, `${cookie}`, or `${userID}`, resolved from the Keychain. Keep secrets out of URLs, literal headers, and bodies.
 
-- macOS 14 or later
-- Apple Silicon or Intel Mac
-- Apple Command Line Tools
-- A signed-in Codex CLI, Codex App, or ChatGPT App installation
+New API/One API and Sub2API provide editable starting templates. Imported templates are disabled until configured. Magpie reads its quotas/usage API; CC Switch imports a user-selected CSV/JSON usage export without accessing its credential database. External exports and local logs are separate statistics datasets.
 
-Notched displays use the physical-notch layout. Other displays fall back to a centered top capsule.
+## Requirements and source build
 
-## Build and run
+- macOS 14+, Apple Silicon or Intel.
+- Apple Command Line Tools for source builds.
+- Source-specific login or credentials; Codex CLI is required only for local Codex mode.
 
 ```sh
 git clone https://github.com/ifryan/codex-meter.git
@@ -46,33 +49,31 @@ cd codex-meter
 open "dist/Codex Meter.app"
 ```
 
-The default build is Universal 2. Development builds use an ad-hoc signature and are intended for local use only.
-
-Build Apple Silicon only:
+The default output is a Universal 2 app. Development builds use ad-hoc signing; public binaries require appropriate signing and notarization.
 
 ```sh
 ARCHS=arm64 ./build-app.sh
 ```
 
-Persist a non-standard Codex executable path and restart the app:
+Custom Codex executables may be chosen per connection, or through the existing `codexExecutablePath` setting and `CODEX_METER_CODEX_PATH` environment override.
 
-```sh
-defaults write io.github.ifryan.codexmeter codexExecutablePath /absolute/path/to/codex
-```
+## Local data and pricing
 
-After moving the app to `/Applications`, click the notch and select the launch-at-login menu item if desired.
+`~/Library/Application Support/CodexMeter/connections.json` stores non-secret connection settings and prices. `usage.sqlite` stores normalized usage events, quota snapshots, and import positions, with a default 90-day retention. Secrets are stored per connection UUID in the `CodexMeter Connections` Keychain service.
+
+Logs are opt-in. Only usage fields are persisted, not prompts, replies, code, or complete sessions. Local and imported records use the local timezone; organization billing uses UTC daily buckets and a separate dataset. Billing records are scoped to the current credentials. Prices match exact model IDs and can be entered manually or supplemented from models.dev on request. Unknown pricing remains unknown; API-price estimates are not subscription payments. See [privacy](PRIVACY.md).
 
 ## Development
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) and the [provider guide](docs/provider-development.md). Suggested validation commands:
 
 ```sh
 swift test
 ./build-app.sh
 ```
 
-The app-server protocol is currently experimental. Please include the Codex version when reporting compatibility problems, but never attach tokens, cookies, or a complete private configuration file.
+Record automated, account, and native UI checks separately. Never attach credentials or complete sessions to issues.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
+## License
 
-## License and acknowledgements
-
-Codex Meter is licensed under [GPL-3.0-only](LICENSE). The visual design was informed by [Atoll](https://github.com/Ebullioscopic/Atoll) and [boring.notch](https://github.com/TheBoredTeam/boring.notch). Ubuntu Mono is distributed under its own license in [Resources/Fonts/LICENCE.txt](Resources/Fonts/LICENCE.txt). See [NOTICE.md](NOTICE.md).
+[GPL-3.0-only](LICENSE). Design and interface references, plus bundled font attribution, are listed in [NOTICE.md](NOTICE.md).

@@ -30,6 +30,10 @@ for arch in $ARCHS; do
         -framework Security \
         -framework ServiceManagement \
         -framework UserNotifications \
+        -framework SwiftUI \
+        -framework WebKit \
+        -framework Charts \
+        -lsqlite3 \
         "$@" \
         -o "$output"
     binary_count=$((binary_count + 1))

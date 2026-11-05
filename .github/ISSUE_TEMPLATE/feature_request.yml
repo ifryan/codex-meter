@@ -3,6 +3,16 @@ description: Suggest an improvement to Codex Meter
 title: "[Feature]: "
 labels: [enhancement]
 body:
+  - type: input
+    id: source
+    attributes:
+      label: Source, region and requested metrics (if applicable)
+      placeholder: Subscription quota, API balance, tokens, reported cost, estimated cost
+  - type: textarea
+    id: interface
+    attributes:
+      label: Public interface or upstream reference
+      description: Link public documentation or source code and describe authentication requirements. Do not attach keys or complete account responses.
   - type: textarea
     id: problem
     attributes:

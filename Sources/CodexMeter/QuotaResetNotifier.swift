@@ -43,6 +43,18 @@ final class QuotaResetNotifier: NSObject, UNUserNotificationCenterDelegate, @unc
         }
     }
 
+    func notify(_ event: QuotaResetEvent, account: SourceAccount, metric: MonitorMetric) {
+        let content = UNMutableNotificationContent()
+        content.title = "\(account.name) 额度已重置"
+        content.body = "\(metric.title)已恢复至 \(event.currentRemainingPercent)%"
+        content.sound = .default
+        content.threadIdentifier = "account-\(account.id.uuidString)"
+        let request = UNNotificationRequest(identifier: "\(account.id.uuidString)-\(metric.id)-\(Int(event.detectedAt.timeIntervalSince1970))", content: content, trigger: nil)
+        center.add(request) { [logger] error in
+            if error != nil { logger.error("Failed to deliver account quota notification") }
+        }
+    }
+
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification,
