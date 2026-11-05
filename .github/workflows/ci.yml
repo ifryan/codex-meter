@@ -25,9 +25,12 @@ jobs:
       - name: Build Universal app
         run: ./build-app.sh
 
+      - name: Package DMG
+        run: ./scripts/package-dmg.sh ci
+
       - name: Verify bundle
         run: |
-          codesign --verify --strict --verbose=2 "dist/Codex Meter.app"
-          test "$(lipo -archs 'dist/Codex Meter.app/Contents/MacOS/CodexMeter')" = "x86_64 arm64" || \
-            test "$(lipo -archs 'dist/Codex Meter.app/Contents/MacOS/CodexMeter')" = "arm64 x86_64"
-          xcrun vtool -show-build "dist/Codex Meter.app/Contents/MacOS/CodexMeter"
+          codesign --verify --strict --verbose=2 "dist/Meterline.app"
+          test "$(lipo -archs 'dist/Meterline.app/Contents/MacOS/Meterline')" = "x86_64 arm64" || \
+            test "$(lipo -archs 'dist/Meterline.app/Contents/MacOS/Meterline')" = "arm64 x86_64"
+          xcrun vtool -show-build "dist/Meterline.app/Contents/MacOS/Meterline"

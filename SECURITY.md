@@ -2,25 +2,25 @@
 
 ## Supported versions
 
-Until tagged releases are available, only the latest revision on the default branch receives security fixes. After releases begin, the latest minor release will be supported.
+Security fixes go to the default branch and the latest release. Older releases aren't patched, so please update.
 
 ## Reporting a vulnerability
 
-Please do not disclose a suspected vulnerability in a public Issue. Use [GitHub private vulnerability reporting](https://github.com/ifryan/codex-meter/security/advisories/new) and include:
+Please do not disclose a suspected vulnerability in a public Issue. Use [GitHub private vulnerability reporting](https://github.com/ifryan/meterline/security/advisories/new) and include:
 
 - affected commit or version;
-- macOS and Codex versions;
+- macOS version, and the version of any related tool or provider;
 - minimal reproduction steps;
 - expected and actual behavior;
 - impact assessment.
 
-Never attach access tokens, cookies, credentials, or a complete private Codex configuration.
+Never attach access tokens, cookies, credentials, or a complete private tool configuration.
 
 ## Trust boundary
 
-Codex Meter is not sandboxed because it needs to launch the local Codex executable. The selected executable runs with the current user's privileges. Install Codex only from a trusted source and use `CODEX_METER_CODEX_PATH` only with an executable you trust.
+Meterline is not sandboxed because it launches local command-line tools such as Codex, Claude Code, and Kiro, and reads files you select. A selected executable runs with the current user's privileges. Install these tools only from a trusted source, and only point a connection or `METERLINE_CODEX_PATH` at an executable you trust.
 
-Multi-source connections can also read explicitly selected CLI/app sessions, OAuth files, local usage logs, and read-only application databases. App-owned secrets are scoped to a connection UUID in the Keychain. Saves authorize only this app and the system credential reader for those dedicated entries, never all applications or other tools' entries. Background access must remain noninteractive.
+Multi-source connections can also read explicitly selected CLI/app sessions, OAuth files, local usage logs, and read-only application databases. App-owned secrets are scoped to a connection UUID in the Keychain. Saves authorize only this app for those dedicated entries, never all applications or other tools' entries. Background reads turn Keychain interaction off, so they fail with a prompt to reauthorize instead of showing a password dialog.
 
 Custom HTTP queries are declarative, not executable plugins. They use explicit URLs, methods, headers, and bounded JSON mappings; credentials belong in Keychain placeholders, not exported constants. Imported templates are disabled until reviewed and configured. HTTP requires explicit enablement, redirects are rejected, and built-in API requests use fixed provider endpoints.
 

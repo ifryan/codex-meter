@@ -1,3 +1,26 @@
+# 迁移说明
+
+## 从 Codex Meter 升级到 Meterline
+
+项目已从 Codex Meter 改名为 Meterline，Bundle ID 改为 `io.github.ifryan.meterline`。首次打开 Meterline 时会自动完成迁移：
+
+- 退出正在运行的 Codex Meter，避免复制时数据库被写入。
+- 把 `~/Library/Application Support/CodexMeter/` 复制到 `Meterline/`，不包含其中的 `backups/`。先复制到临时目录再改名，中断时不会留下半成品；失败时会提示并退出，不会用空配置启动。
+- 复制原有偏好设置，例如 Codex 路径和排列顺序。
+
+旧目录和旧设置都不会删除，退回旧版本仍可使用。确认新版正常后，可以自行删除 `/Applications/Codex Meter.app` 和旧目录。
+
+有两件事需要手动处理：
+
+1. **开机自动启动**：登录项绑定在旧应用上，无法自动迁移。请先在旧版中关闭，或在“系统设置 → 通用 → 登录项”中移除，再在 Meterline 中重新开启。否则旧版会在登录时和新版同时运行。
+2. **钥匙串**：凭据不需要重新填写。条目已改名为 `Meterline Connections`、`Meterline GLM Coding Plan` 和 `Meterline Claude Token`。旧条目由旧版应用创建，Meterline 通常无法静默读取，所以每个保存过凭据的连接一般需要授权一次：连接会提示需要授权，在连接编辑器中点击“重新授权已保存凭据”（旧版 GLM 连接点击“迁移旧 GLM 凭据”后保存），系统可能询问一次钥匙串密码，之后凭据会写入新条目。后台读取不会弹密码窗口。
+
+旧的钥匙串条目会保留，方便退回旧版；删除连接时新旧条目会一起删除。确认新版正常后，可以在“钥匙串访问”里搜索 `CodexMeter` 手动删除。`Claude Token` 条目由你自己创建，应用只读取，不会复制；新建时请使用新名字，旧名字仍可读取。
+
+历史数据库会升级到第 3 版：账单标签、价格版本和计量单位改为英文存储，账单事件 ID 也一起改写，所以下次刷新不会重复计费。配置文件中的同类值会在读取时自动转换。升级后旧版无法打开新版的数据库，但旧版使用的是自己的旧目录，不受影响。
+
+环境变量改为 `METERLINE_*`，例如 `METERLINE_CODEX_PATH`，旧的 `CODEX_METER_*` 仍然有效。
+
 # 多来源版本迁移
 
 ## 首次启动
@@ -7,8 +30,8 @@
 新配置位于：
 
 ```text
-~/Library/Application Support/CodexMeter/connections.json
-~/Library/Application Support/CodexMeter/usage.sqlite
+~/Library/Application Support/Meterline/connections.json
+~/Library/Application Support/Meterline/usage.sqlite
 ```
 
 前者保存连接元数据、日志目录、常驻项与价格；后者保存用量事件、额度快照和导入进度。文件按 owner-only 权限写入。密码、Token 和 Cookie 不写入上述文件。
@@ -33,9 +56,3 @@
 统计数据集分为本地日志、已有工具导出、服务商账单。前两类按本机时区；OpenAI／Anthropic 组织账单按原始 UTC 日分组，未按模型拆分的费用独立显示。更换凭据后仅显示当前修订的账单，旧行按保留期保存；不同 Key 共享组织权限时需避免重复添加同一账单范围。
 
 “清除本地历史”删除统计与额度历史，保留连接、凭据和导入位置，避免立刻自动重导已有文件。“重新导入日志”重置位置，重新读取原文件，并按稳定 ID 去重。原工具日志始终保留。
-
-## 本轮状态
-
-2026-10-27 按用户指令执行 `./build-app.sh`，完成 `arm64`／`x86_64` Universal 2 构建及本地签名校验，备份并替换 `/Applications/Codex Meter.app`，随后启动并确认新进程运行。备份位于 `~/Library/Application Support/CodexMeter/backups/20261027-174115/`，包含原应用、安装记录及可用的启动前数据文件。
-
-本次未运行单元测试、逐项真实账户核验或界面验收；没有提交、推送或发布。构建存在旧钥匙串 API 和 Swift 6 异步兼容性警告，当前语言模式下无编译错误。分发前仍需相应验证和正式签名／公证。

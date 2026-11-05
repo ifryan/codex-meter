@@ -1,8 +1,8 @@
 # 来源与能力矩阵
 
-本轮改造新增了来源／账户注册、独立认证、统一指标和通用展示接线。目录有 41 个来源或模板条目，包含地区变体、已有工具连接和已停用接口，**不等于 41 家已经验证可用的服务**。
+目录有 41 个来源或模板条目，包含地区变体、已有工具连接和已停用接口，**不等于 41 家已经验证可用的服务**。
 
-截至 2026-10-27，本轮代码已完成 Universal 2 构建、签名校验和本机替换安装；未运行单元测试，未按来源逐项核验真实账户或完成界面验收。下表表示已编写的读取路径与认证前提；接入是否成功还取决于相应账户、权限和服务商接口版本。SiliconFlow 的退役接口单独标注，不能列为当前可用余额能力。
+CI 在每次推送时运行单元测试和 Universal 2 构建，测试使用合成样例。各来源尚未逐项用真实账户核验，原生界面也未完成验收。下表表示已编写的读取路径与认证前提；接入是否成功还取决于相应账户、权限和服务商接口版本。SiliconFlow 的退役接口单独标注，不能列为当前可用余额能力。
 
 | ID | 来源 | 读取路径／指标 | 认证与限制 |
 | --- | --- | --- | --- |
@@ -67,6 +67,6 @@ OpenAI／Anthropic 管理级连接读取最近 30 个 UTC 日，费用与 Token 
 
 ## 验证记录约定
 
-每个来源应分别记录：代码实现、脱敏样例、自动检查、真实账户、原生界面验收。某项检查通过不代表其他检查也通过。本轮自动检查仅完成构建和安装产物校验；新增测试源码位于 `MonitoringTests.swift`，尚未运行，也不能据此声称脱敏样例、真实账户或界面已验收。
+每个来源应分别记录：代码实现、脱敏样例、自动检查、真实账户、原生界面验收。某项检查通过不代表其他检查也通过。目前的自动检查覆盖构建和 `Tests/MeterlineTests` 中的合成样例，不代表真实账户或界面已验收。
 
 参考：[CodexBar](https://github.com/steipete/CodexBar/tree/main/docs)、[Magpie](https://github.com/yetone/magpie/tree/main/internal/provider)、[CC Switch](https://github.com/farion1231/cc-switch)、[Novita 官方余额协议](https://docs.novita.ai/api-reference/basic-get-user-balance)、[ZenMux 官方协议](https://zenmux.ai/docs/guide/quickstart)。

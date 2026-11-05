@@ -4,14 +4,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "CodexMeter",
+    name: "Meterline",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "CodexMeter", targets: ["CodexMeter"])
+        .executable(name: "Meterline", targets: ["Meterline"])
     ],
     targets: [
         .executableTarget(
-            name: "CodexMeter",
+            name: "Meterline",
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("QuartzCore"),
@@ -24,6 +24,6 @@ let package = Package(
                 .linkedLibrary("sqlite3")
             ]
         ),
-        .testTarget(name: "CodexMeterTests", dependencies: ["CodexMeter"])
+        .testTarget(name: "MeterlineTests", dependencies: ["Meterline"])
     ]
 )

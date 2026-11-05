@@ -1,6 +1,6 @@
 # Notices and acknowledgements
 
-## Codex Meter
+## Meterline
 
 Copyright © 2026 Ryan.
 
@@ -19,7 +19,7 @@ The notch presentation was informed by the public designs of:
 
 ## Trademarks
 
-Codex and OpenAI are trademarks of OpenAI. This project is unofficial and is not affiliated with or endorsed by OpenAI.
+Product and company names, including Codex, OpenAI, Claude, and Anthropic, are trademarks of their respective owners. This project is unofficial and is not affiliated with or endorsed by any of them.
 
 ## Provider architecture and protocol references
 

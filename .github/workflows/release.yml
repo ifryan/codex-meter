@@ -1,0 +1,153 @@
+name: Release
+
+# Push a tag such as v0.3.0 or v0.3.0-beta.1 to build a draft GitHub Release.
+# Publishing the draft stays a manual step.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      # Signing and notarization run only when the Apple secrets are configured.
+      HAS_APPLE_SECRETS: ${{ secrets.DEVELOPER_ID_P12_BASE64 != '' && secrets.ASC_KEY_P8 != '' }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        run: |
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+          echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || { echo "::error::Invalid tag $tag"; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$tag is not on main"; exit 1; }
+          {
+            echo "VERSION=$version"
+            echo "MARKETING_VERSION=${version%%-*}"
+          } >> "$GITHUB_ENV"
+          case "$version" in
+            *-*) echo "PRERELEASE_FLAG=--prerelease" >> "$GITHUB_ENV" ;;
+            *) echo "PRERELEASE_FLAG=" >> "$GITHUB_ENV" ;;
+          esac
+
+      - name: Write release notes
+        run: |
+          section="$MARKETING_VERSION"
+          grep -q "^## \[$section\]" CHANGELOG.md || section="Unreleased"
+          if [ -z "$PRERELEASE_FLAG" ] && [ "$section" = "Unreleased" ]; then
+            echo "::error::CHANGELOG.md has no section for $MARKETING_VERSION"
+            exit 1
+          fi
+          awk -v heading="## [$section]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found && /^\[[^]]+\]: / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md
+          if [ "$HAS_APPLE_SECRETS" != "true" ]; then
+            cat - notes.md > notes-with-install.md <<'NOTES'
+          > **First launch:** this build isn't notarized by Apple, so macOS blocks it the first time. Drag Meterline to Applications and open it once, then go to System Settings → Privacy & Security and click **Open Anyway**. If macOS says the app is damaged, run `xattr -dr com.apple.quarantine /Applications/Meterline.app`.
+
+          NOTES
+            mv notes-with-install.md notes.md
+          fi
+
+      - name: Run tests
+        run: swift test
+
+      - name: Import signing certificate
+        if: env.HAS_APPLE_SECRETS == 'true'
+        env:
+          P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 7200 "$keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          identity=$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)
+          test -n "$identity" || { echo "::error::No Developer ID Application identity in the certificate"; exit 1; }
+          echo "CODE_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Build app
+        run: APP_VERSION="$MARKETING_VERSION" APP_BUILD="$GITHUB_RUN_NUMBER" ./build-app.sh
+
+      - name: Prepare notarization key
+        if: env.HAS_APPLE_SECRETS == 'true'
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: printf '%s' "$ASC_KEY_P8" > "$RUNNER_TEMP/notary-key.p8"
+
+      - name: Notarize app
+        if: env.HAS_APPLE_SECRETS == 'true'
+        timeout-minutes: 40
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          ditto -c -k --keepParent dist/Meterline.app "$RUNNER_TEMP/Meterline.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/Meterline.zip" --key "$RUNNER_TEMP/notary-key.p8" \
+            --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --wait --timeout 30m
+          xcrun stapler staple dist/Meterline.app
+          spctl --assess --type execute --verbose dist/Meterline.app
+
+      - name: Package DMG
+        run: ./scripts/package-dmg.sh "$VERSION"
+
+      - name: Notarize DMG
+        if: env.HAS_APPLE_SECRETS == 'true'
+        timeout-minutes: 40
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          dmg="dist/Meterline-$VERSION.dmg"
+          codesign --force --timestamp --sign "$CODE_SIGN_IDENTITY" "$dmg"
+          xcrun notarytool submit "$dmg" --key "$RUNNER_TEMP/notary-key.p8" \
+            --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" --wait --timeout 30m
+          xcrun stapler staple "$dmg"
+          spctl --assess --type open --context context:primary-signature --verbose "$dmg"
+
+      - name: Write checksum
+        working-directory: dist
+        run: shasum -a 256 "Meterline-$VERSION.dmg" > "Meterline-$VERSION.dmg.sha256"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/Meterline-${{ env.VERSION }}.dmg
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/Meterline-$VERSION.dmg" "dist/Meterline-$VERSION.dmg.sha256" \
+            --draft --verify-tag $PRERELEASE_FLAG --title "Meterline $VERSION" --notes-file notes.md
+
+      - name: Remove signing material
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/notary-key.p8"
+          if [ -f "$RUNNER_TEMP/signing.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/signing.keychain-db"
+          fi

@@ -3,17 +3,22 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key>
-    <string>zh_CN</string>
+    <string>en</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>zh-Hans</string>
+    </array>
     <key>CFBundleDisplayName</key>
-    <string>Codex Meter</string>
+    <string>Meterline</string>
     <key>CFBundleExecutable</key>
-    <string>CodexMeter</string>
+    <string>Meterline</string>
     <key>CFBundleIdentifier</key>
-    <string>io.github.ifryan.codexmeter</string>
+    <string>io.github.ifryan.meterline</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Codex Meter</string>
+    <string>Meterline</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

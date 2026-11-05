@@ -1,6 +1,6 @@
 # 隐私说明 / Privacy
 
-Codex Meter 是本机用量监控工具，没有自建账户服务、分析、广告或自动上传历史记录的后台。
+Meterline 是本机用量监控工具，没有自建账户服务、分析、广告或自动上传历史记录的后台。
 
 ## 连接与启用
 
@@ -10,9 +10,9 @@ Codex Meter 是本机用量监控工具，没有自建账户服务、分析、�
 
 ## 安全凭据
 
-用户在安全凭据栏输入的 Key、OAuth Token、Cookie，以及云账号 AK/SK，按连接 UUID 存入 macOS 钥匙串的 `CodexMeter Connections` 条目。不会导出到配置模板、写入普通配置或作为命令行参数传递。
+用户在安全凭据栏输入的 Key、OAuth Token、Cookie，以及云账号 AK/SK，按连接 UUID 存入 macOS 钥匙串的 `Meterline Connections` 条目。旧版的 `CodexMeter Connections` 条目会在首次读取时复制过来，并保留到连接被删除。不会导出到配置模板、写入普通配置或作为命令行参数传递。
 
-成功读取的凭据只在进程内缓存。后台读取使用非交互路径；条目需要授权或钥匙串锁定时显示设置提示。用户保存或重新授权时，只为本应用专属条目信任当前应用和系统 `/usr/bin/security` 读取程序，不开放所有应用，也不修改其他工具的条目。重建导致身份变化后，可以在连接编辑器中重新授权已有凭据。
+成功读取的凭据只在进程内缓存。后台读取关闭钥匙串交互，不会弹出密码窗口；条目需要授权或钥匙串锁定时显示设置提示。用户保存或重新授权时，只为本应用专属条目信任当前应用，不开放所有应用，也不修改其他工具的条目。应用身份变化后（例如未经 Developer ID 签名的版本更新或重新构建），需要在连接编辑器中重新授权已有凭据，系统可能询问一次钥匙串密码。
 
 原 GLM 专属条目兼容读取；显式迁移复制到新连接条目，不删除旧条目。原 Claude 本机登录态保持只读，必要时由其自己的 CLI 续期。应用不保存钥匙串密码。
 
@@ -38,7 +38,7 @@ Magpie 只读其本机或 HTTPS quotas／usage 接口，不改写路由配置。
 
 ## 本地存储与历史
 
-目录：`~/Library/Application Support/CodexMeter/`。
+目录：`~/Library/Application Support/Meterline/`。
 
 - `connections.json`：连接 UUID、用户命名、来源、认证模式、非敏感查询配置、路径、常驻项、日志账户绑定与价格。
 - `usage.sqlite`：用量事件、额度快照和导入位置。快照可包含来源返回的账号标识、套餐、余额、额度及更新时间；事件包含时间、工具、账户 UUID、模型、Token、费用、币种、价格版本及数据口径。
@@ -67,7 +67,7 @@ Magpie 只读其本机或 HTTPS quotas／usage 接口，不改写路由配置。
 
 ---
 
-Codex Meter stores connection metadata and normalized history locally, with no application analytics or custom upload service. Secrets entered in credential fields live in per-connection Keychain items, not exported templates. Background access is noninteractive; explicit saves/reauthorization trust only the app and the system reader for app-owned items. Legacy GLM items remain available for compatibility.
+Meterline stores connection metadata and normalized history locally, with no application analytics or custom upload service. Secrets entered in credential fields live in per-connection Keychain items, not exported templates. Background access is noninteractive; explicit saves/reauthorization trust only the app for app-owned items. Legacy GLM items remain available for compatibility.
 
 Local session and log access is selected per source. Log scanning is opt-in, and only usage metadata is persisted; prompts, responses, code, and full sessions are not stored in the history database. Web login uses isolated temporary WebKit storage. CLI behavior remains subject to the original tool's own configuration. Paid Claude probes are disabled by default.
 
