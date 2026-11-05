@@ -40,12 +40,12 @@ anthropic-ratelimit-unified-7d-reset: 1788418800
 ```sh
 claude setup-token          # 按提示授权，复制 sk-ant-oat01-... 令牌
 security add-generic-password -U \
-  -s "CodexMeter Claude Token" -a "claude-usage-token" -w "<粘贴令牌>"
+  -s "Meterline Claude Token" -a "claude-usage-token" -w "<粘贴令牌>"
 ```
 
 代价是每次刷新会发一个刻意最小化的请求（最便宜的模型、`max_tokens: 1`，约 10 tokens）。报错响应**不带**限额头（已对 403/404 实测确认），所以没有零成本读取的办法。
 
-令牌优先级：环境变量 `CODEX_METER_CLAUDE_TOKEN` → 钥匙串条目 `CodexMeter Claude Token`。
+令牌优先级：环境变量 `METERLINE_CLAUDE_TOKEN` → 钥匙串条目 `Meterline Claude Token`（旧名 `CodexMeter Claude Token` 仍可读取）。
 
 ### 回退通道：`/api/oauth/usage` + Claude Code 登录态
 
@@ -81,7 +81,7 @@ OAuth token does not meet scope requirement user:profile
 2. 输入智谱国内版 Coding Plan API Key，点击 **保存并连接**。
 3. 悬停查看连接结果、5 小时 / 每周额度、服务端返回的其他窗口，以及月度 MCP 额度。MCP 不参与常驻百分比的选择。
 
-密钥通过 Security framework 保存至 macOS 钥匙串的 `CodexMeter GLM Coding Plan` 条目，账户名为 `glm-coding-plan-api-key`。不会写入普通配置、命令行参数或日志。配置窗口留空后点击保存，可使用并重新授权已保存的密钥；取消不改变配置；“移除配置”删除该条目并清除 GLM 快照。
+密钥通过 Security framework 保存至 macOS 钥匙串的 `Meterline GLM Coding Plan` 条目，账户名为 `glm-coding-plan-api-key`。不会写入普通配置、命令行参数或日志。配置窗口留空后点击保存，可使用并重新授权已保存的密钥；取消不改变配置；“移除配置”删除该条目并清除 GLM 快照。
 
 查询使用 `GET https://open.bigmodel.cn/api/monitor/usage/quota/limit`，认证方式参考[智谱官方用量插件](https://github.com/zai-org/zai-coding-plugins/blob/main/plugins/glm-plan-usage/skills/usage-query-skill/scripts/query-usage.mjs)。仅查询额度，不发送模型推理请求。兼容 `TOKENS_LIMIT` 和 `CREDIT_LIMIT`，未提供周期的窗口标注“周期未知”，无重置时间时常驻显示 `--H`。
 
