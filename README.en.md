@@ -8,7 +8,7 @@
 
 A native macOS monitor for AI usage. Subscription quotas, reset times, API balances, tokens, and costs appear around the MacBook notch, or in a centered capsule on screens without one.
 
-It tracks multiple accounts across many services, in English or Simplified Chinese depending on your macOS language. Only local Codex mode needs the Codex CLI.
+It tracks multiple accounts across many services, in English or Simplified Chinese. It follows your macOS language by default, and you can change it under **Language** in the notch menu. Only local Codex mode needs the Codex CLI.
 
 The project was previously called Codex Meter. Upgrading migrates your data automatically. See the [migration guide](docs/migration.md) (in Chinese).
 

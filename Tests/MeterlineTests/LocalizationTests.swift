@@ -35,6 +35,22 @@ final class LocalizationTests: XCTestCase {
         XCTAssertEqual(Set(translations.keys).subtracting(keys), [], "Translations no code uses")
     }
 
+    func testLanguagePreferenceReadsOnlySupportedSavedChoice() {
+        XCTAssertNil(LanguagePreference.current(in: nil))
+        XCTAssertNil(LanguagePreference.current(in: ["AppleLanguages": ["fr"]]))
+        XCTAssertEqual(LanguagePreference.current(in: ["AppleLanguages": ["zh-Hans"]]), "zh-Hans")
+    }
+
+    func testLanguagePreferenceSavesAndClearsChoice() throws {
+        let suite = "LocalizationTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        LanguagePreference.set("en", defaults: defaults)
+        XCTAssertEqual(LanguagePreference.current(in: defaults.persistentDomain(forName: suite)), "en")
+        LanguagePreference.set(nil, defaults: defaults)
+        XCTAssertNil(LanguagePreference.current(in: defaults.persistentDomain(forName: suite)))
+    }
+
     func testFormattingSubstitutesAndKeepsPercentSigns() {
         XCTAssertEqual(L("%@%% left", "52"), "52% left")
         XCTAssertEqual(L("%1$@ (%2$@)", "a", "b"), "a (b)")

@@ -8,7 +8,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 
-- Simplified Chinese and English interface. The app follows the macOS language setting, and falls back to English.
+- Simplified Chinese and English interface. The app follows the macOS language setting by default, falls back to English, and has a Language menu to choose one.
 - Release workflow that builds a draft GitHub Release with a DMG and checksum, with signing and notarization when Apple credentials are configured.
 
 - Local macOS notifications when consecutive usage snapshots detect a primary quota reset.

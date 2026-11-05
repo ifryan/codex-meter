@@ -30,7 +30,7 @@ cd meterline
 
 写入配置或数据库、参与 ID 生成的值不能包在 `L()` 里，否则切换语言后同一笔账单会被重复统计。这类值一律用固定的英文存储，例如 `StoredLabel` 和 `MonitorFormat.countUnit`，只在显示时翻译。
 
-新增语言：添加 `Resources/<语言>.lproj/Localizable.strings`，再把语言代码加入 `Info.plist` 的 `CFBundleLocalizations`。
+新增语言：添加 `Resources/<语言>.lproj/Localizable.strings`，再把语言代码加入 `Info.plist` 的 `CFBundleLocalizations` 和 `LanguagePreference.options`。
 
 ## 检查与 PR
 

@@ -87,12 +87,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         loginItem.target = self
         menu.addItem(loginItem)
         if let launchAtLoginError { addDisabled(launchAtLoginError, to: menu) }
+        menu.addItem(makeLanguageItem())
 
         menu.addItem(.separator())
         let quitItem = NSMenuItem(title: L("Quit Meterline"), action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
         return menu
+    }
+
+    private func makeLanguageItem() -> NSMenuItem {
+        let submenu = NSMenu()
+        submenu.autoenablesItems = false
+        let current = LanguagePreference.current
+        let choices: [(code: String?, name: String)] = [(nil, L("Follow System"))] + LanguagePreference.options.map { ($0.code, $0.name) }
+        for choice in choices {
+            let item = NSMenuItem(title: choice.name, action: #selector(selectLanguage), keyEquivalent: "")
+            item.target = self
+            item.representedObject = choice.code
+            item.state = choice.code == current ? .on : .off
+            submenu.addItem(item)
+        }
+        let item = NSMenuItem(title: L("Language"), action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        // Demo mode saves nothing, and its restart would start the app with real data.
+        item.isEnabled = !isDemoMode
+        return item
+    }
+
+    @objc private func selectLanguage(_ sender: NSMenuItem) {
+        let code = sender.representedObject as? String
+        guard code != LanguagePreference.current else { return }
+        LanguagePreference.set(code)
+
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = L("Restart Meterline to change the language")
+        alert.addButton(withTitle: L("Restart Now"))
+        alert.addButton(withTitle: L("Later"))
+        if alert.runModal() == .alertFirstButtonReturn { restart() }
+    }
+
+    /// The app allows one running instance, so the new one starts only after this one has exited.
+    private func restart() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "while kill -0 \"$0\" 2>/dev/null; do sleep 0.1; done; exec /usr/bin/open \"$1\"",
+                             String(ProcessInfo.processInfo.processIdentifier), Bundle.main.bundlePath]
+        do {
+            try process.run()
+            NSApp.terminate(nil)
+        } catch {
+            logger.error("Failed to restart: \(error.localizedDescription, privacy: .private)")
+        }
     }
 
     private func addDisabled(_ title: String, to menu: NSMenu) {

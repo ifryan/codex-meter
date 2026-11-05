@@ -465,3 +465,8 @@
 "usage endpoint returned HTTP %@" = "usage 接口 HTTP %@";
 "uses" = "次";
 " " = "";
+"Follow System" = "跟随系统";
+"Language" = "语言";
+"Restart Meterline to change the language" = "重启 Meterline 后切换语言";
+"Restart Now" = "立即重启";
+"Later" = "稍后";
