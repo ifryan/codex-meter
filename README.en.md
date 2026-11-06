@@ -1,3 +1,5 @@
+<p align="center"><img src="Resources/AppIcon.png" width="128" alt="Meterline icon"></p>
+
 # Meterline
 
 [中文](README.md) · [Provider matrix](docs/providers.md) · [Migration](docs/migration.md) · [Privacy](PRIVACY.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md)

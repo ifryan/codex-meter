@@ -11,6 +11,8 @@
     </array>
     <key>CFBundleDisplayName</key>
     <string>Meterline</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleExecutable</key>
     <string>Meterline</string>
     <key>CFBundleIdentifier</key>

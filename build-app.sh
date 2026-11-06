@@ -63,6 +63,17 @@ fi
 test -f "$PROJECT_DIR/Resources/Fonts/UbuntuMono-Regular.ttf"
 test -f "$PROJECT_DIR/Resources/Fonts/UbuntuMono-Bold.ttf"
 cp -R "$PROJECT_DIR/Resources/Fonts" "$APP_DIR/Contents/Resources/Fonts"
+ICONSET="$BUILD_DIR/AppIcon.iconset"
+rm -rf "$ICONSET"
+mkdir -p "$ICONSET"
+# macOS 26 puts icons on a gray plate at small sizes if 16 and 32 point images are included.
+# Without them, the system scales down the larger images instead.
+for size in 128 256 512; do
+    /usr/bin/sips -z "$size" "$size" "$PROJECT_DIR/Resources/AppIcon.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+    double=$((size * 2))
+    /usr/bin/sips -z "$double" "$double" "$PROJECT_DIR/Resources/AppIcon.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+done
+/usr/bin/iconutil -c icns "$ICONSET" -o "$APP_DIR/Contents/Resources/AppIcon.icns"
 for strings in "$PROJECT_DIR"/Resources/*.lproj/Localizable.strings; do
     /usr/bin/plutil -lint "$strings" >/dev/null
     language_dir=$(basename "$(dirname "$strings")")
