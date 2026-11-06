@@ -31,7 +31,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - The application uses a source/account collection instead of three dedicated AppDelegate client states.
 - Claude uses the non-inference usage path first; billed probes require an explicit per-connection opt-in.
 - Local logs, external exports and organization daily bills are separate statistics datasets; billing uses UTC days and current credential scopes, while currencies and pricing origins remain distinct.
-- Legacy connection migration and expanded privacy/contribution documentation are included. Provider account verification and native UI acceptance remain pending.
+- Legacy connection migration and expanded privacy/contribution documentation are included. Provider account verification remains pending.
 
 ## [0.2.0] - 2026-07-22
 
