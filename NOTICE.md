@@ -6,6 +6,10 @@ Copyright © 2026 Ryan.
 
 Licensed under GPL-3.0-only. See [LICENSE](LICENSE).
 
+## App icon
+
+The app icon was generated with the image tool in OpenAI Codex, then cropped and adjusted for this project. It is distributed with this project under the same license.
+
 ## Ubuntu Mono
 
 The bundled Ubuntu Mono font files are distributed under the Ubuntu Font Licence 1.0. The complete license is included at [Resources/Fonts/LICENCE.txt](Resources/Fonts/LICENCE.txt).

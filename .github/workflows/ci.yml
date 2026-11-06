@@ -31,6 +31,7 @@ jobs:
       - name: Verify bundle
         run: |
           codesign --verify --strict --verbose=2 "dist/Meterline.app"
+          test -f "dist/Meterline.app/Contents/Resources/AppIcon.icns"
           test "$(lipo -archs 'dist/Meterline.app/Contents/MacOS/Meterline')" = "x86_64 arm64" || \
             test "$(lipo -archs 'dist/Meterline.app/Contents/MacOS/Meterline')" = "arm64 x86_64"
           xcrun vtool -show-build "dist/Meterline.app/Contents/MacOS/Meterline"
