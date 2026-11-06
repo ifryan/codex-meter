@@ -51,11 +51,11 @@ macOS 原生的 AI 用量监控工具。订阅额度、重置时间、API 余额
 
 项目处于 1.0 之前，配置和界面还可能变化。
 
-- **版本**：多来源监控目前只在 `main` 分支上，还没有发布版本。最新的 [v0.2.0](https://github.com/ifryan/meterline/releases/tag/v0.2.0) 早于这次改动，也没有附带安装包。下一个版本起，[Releases](https://github.com/ifryan/meterline/releases) 会提供 `.dmg`。
+- **版本**：最新的预发布版是 [v0.3.0-beta.2](https://github.com/ifryan/meterline/releases/tag/v0.3.0-beta.2)，附带 `.dmg`。它没有经过 Apple 公证，首次打开的步骤见下面的“安装”。正式版 0.3.0 还没有发布。
 - **自动检查**：CI 在每次推送时运行 `swift test` 和 Universal 2 构建。
-- **尚未完成**：逐个来源的真实账户核验、新界面的完整验收。这些接口大多不是服务商公开承诺的稳定契约，返回格式变化后解析可能失效。遇到这种情况欢迎[提 Issue](https://github.com/ifryan/meterline/issues)。
+- **尚未完成**：逐个来源的真实账户核验。这些接口大多不是服务商公开承诺的稳定契约，返回格式变化后解析可能失效。遇到这种情况欢迎[提 Issue](https://github.com/ifryan/meterline/issues)。
 
-新界面的截图会在验收后补上。
+新界面的截图还没有补上。
 
 ## 安装
 

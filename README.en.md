@@ -51,11 +51,11 @@ Local log scanning covers Codex, Claude, Gemini CLI, OpenCode, and Pi. Kimi and 
 
 The project is pre-1.0, so configuration and UI may still change.
 
-- **Releases**: multi-source monitoring is only on `main` and hasn't been released. The latest release, [v0.2.0](https://github.com/ifryan/meterline/releases/tag/v0.2.0), predates it and has no installer attached. From the next version on, [Releases](https://github.com/ifryan/meterline/releases) will include a `.dmg`.
+- **Releases**: the latest pre-release is [v0.3.0-beta.2](https://github.com/ifryan/meterline/releases/tag/v0.3.0-beta.2), with a `.dmg`. It isn't notarized by Apple, so see Install below for the first launch. The final 0.3.0 hasn't been released yet.
 - **Automated checks**: CI runs `swift test` and a Universal 2 build on every push.
-- **Not done yet**: source-by-source verification with real accounts, and full acceptance testing of the new UI. Most of these APIs aren't stable public contracts, so parsing can break when a response changes. If that happens, please [open an issue](https://github.com/ifryan/meterline/issues).
+- **Not done yet**: source-by-source verification with real accounts. Most of these APIs aren't stable public contracts, so parsing can break when a response changes. If that happens, please [open an issue](https://github.com/ifryan/meterline/issues).
 
-Screenshots of the new UI will be added after acceptance testing.
+Screenshots of the new UI are still to come.
 
 ## Install
 
